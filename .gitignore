@@ -1,0 +1,44 @@
+# --- data and images -------------------------------------------------------
+# The competition CSVs and the downloaded images are large and reproducible.
+#
+# Leading slashes matter: an unanchored `data/` would also match the source
+# package `src/amlc24/data/` and silently drop it from the repo.
+/data/
+/images/
+*.csv.gz
+
+# --- model weights ---------------------------------------------------------
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# --- results ---------------------------------------------------------------
+# results/ is DELIBERATELY NOT IGNORED. The leaderboard, metrics, per-entity
+# breakdowns, and the frozen split are the research record -- they are the point
+# of this repository and must be committed.
+#
+# Only the things that are large or regenerable are excluded:
+/results/runs/*/checkpoints/
+/results/cache/
+/results/**/*.zip
+/results/download_failures.txt
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# --- notebooks -------------------------------------------------------------
+.ipynb_checkpoints/
+
+# --- editors / OS ----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

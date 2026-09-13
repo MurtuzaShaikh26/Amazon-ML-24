@@ -1,0 +1,1 @@
+run_id,timestamp,description,model,quant_bits,lora_r,n_train,n_eval,epochs,lr,max_pixels,f1_raw,f1_post,precision,recall,train_seconds,config_hash,notes

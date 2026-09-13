@@ -1,0 +1,56 @@
+extends: base.yaml
+run_id: run001_qwen2vl_8bit_10k
+description: >
+  First fine-tune. Qwen2-VL-7B-Instruct, 8-bit QLoRA, 10k stratified training
+  samples, 3 epochs, evaluated on the frozen 5k eval split.
+
+seed: 42
+
+data:
+  train_size: 10000
+  eval_size: 5000
+  split_file: results/splits/split_seed42.json
+
+model:
+  id: Qwen/Qwen2-VL-7B-Instruct
+  attn_implementation: sdpa
+
+quantization:
+  bits: 8            # flip to 4 if OOM
+
+processor:
+  min_pixels_tokens: 64
+  max_pixels_tokens: 256
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  freeze_vision_tower: true
+
+train:
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  optim: paged_adamw_8bit
+  fp16: true
+  gradient_checkpointing: true
+  logging_steps: 25
+
+prompt:
+  template: prompt_v1
+  include_allowed_units: true
+
+inference:
+  max_new_tokens: 24
+  num_beams: 1
+
+postprocess:
+  enabled: true
+  normalize_units: true
+  reject_invalid_units: true
+  range_rule: blank

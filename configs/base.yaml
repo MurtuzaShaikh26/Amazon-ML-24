@@ -1,0 +1,81 @@
+# Base configuration. Every run config extends this and overrides what it tests.
+#
+# Values here are the defaults that make a 7B VLM fit on a single 16 GB T4:
+# 8-bit weights, a hard cap on visual tokens, batch size 1 with accumulation,
+# gradient checkpointing, and a paged 8-bit optimiser. Changing any of them
+# changes the memory budget -- see NOTES.md for the arithmetic.
+
+run_id: base
+description: >
+  Shared defaults. Not runnable on its own; extend it from a run config.
+
+seed: 42
+
+data:
+  train_size: 10000
+  eval_size: 5000
+  # The frozen 5k eval split. Committed, verified on load, never regenerated.
+  split_file: results/splits/split_seed42.json
+  verify_split: true
+  download_threads: 32
+  drop_missing_images: true
+
+model:
+  id: Qwen/Qwen2-VL-7B-Instruct
+  # Turing (T4) has no flash-attention-2. sdpa is the memory-efficient option.
+  attn_implementation: sdpa
+
+quantization:
+  bits: 8              # 8 or 4; flip to 4 if the run OOMs
+
+processor:
+  # Visual tokens per image = pixels / (28*28). This is THE memory knob:
+  # Qwen2-VL's dynamic resolution emits thousands of tokens at its defaults.
+  min_pixels_tokens: 64
+  max_pixels_tokens: 256
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  freeze_vision_tower: true
+
+train:
+  num_train_epochs: 3
+  per_device_train_batch_size: 1
+  per_device_eval_batch_size: 1
+  gradient_accumulation_steps: 8      # effective batch size 8
+  learning_rate: 2.0e-4
+  lr_scheduler_type: cosine
+  warmup_ratio: 0.03
+  optim: paged_adamw_8bit
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  fp16: true                          # never bf16 on Turing
+  gradient_checkpointing: true
+  logging_steps: 25
+  save_total_limit: 2
+  max_length: 1024
+  dataloader_num_workers: 0
+  # Eval loss each epoch runs on this fraction of the eval set; final scoring
+  # always uses all 5,000 rows.
+  eval_loss_fraction: 0.1
+
+prompt:
+  template: prompt_v1
+  include_allowed_units: true
+
+inference:
+  max_new_tokens: 24
+  num_beams: 1
+  batch_size: 4
+
+postprocess:
+  enabled: true
+  strip_scaffolding: true
+  normalize_units: true
+  normalize_numbers: true
+  reject_invalid_units: true
+  infer_missing_unit: true
+  range_rule: blank            # blank | max | min
