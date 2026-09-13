@@ -33,6 +33,11 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+
+def _fmt4(value: float) -> str:
+    """pandas >= 2 requires float_format to be a callable."""
+    return f"{value:.4f}"
+
 OUTCOMES = ("TP", "FP", "FN", "TN")
 
 
@@ -139,8 +144,53 @@ def f1_by_entity(
     their values are in a product photo, and an overall score hides that.
     """
     table = _grouped_frame(y_true, y_pred, entity_names, "entity_name")
-    logger.info("Per-entity F1:\n%s", table.to_string(index=False, float_format="%.4f"))
+    logger.info("Per-entity F1:\n%s", table.to_string(index=False, float_format=_fmt4))
     return table
+
+
+def f1_by_group(
+    y_true: Sequence[Any],
+    y_pred: Sequence[Any],
+    group_ids: Sequence[Any],
+    min_support: int = 20,
+    top_k: int | None = 40,
+) -> pd.DataFrame:
+    """F1 per ``group_id`` -- the product-category breakdown.
+
+    There are 750 groups with a long tail, so scoring every one produces mostly
+    noise. Groups with fewer than ``min_support`` eval rows are pooled into a
+    single ``(small groups)`` row, and only the ``top_k`` largest are listed
+    individually. A category that scores far below the rest usually means a
+    product type whose packaging the model cannot read -- a data problem, not a
+    formatting one.
+    """
+    table = _grouped_frame(y_true, y_pred, groups=[str(g) for g in group_ids],
+                           group_col="group_id")
+    total_row = table[table["group_id"] == "TOTAL"]
+    body = table[table["group_id"] != "TOTAL"]
+
+    small = body[body["n"] < min_support]
+    large = body[body["n"] >= min_support]
+
+    if not small.empty:
+        pooled = _scores_from_counts({
+            "TP": int(small["tp"].sum()), "FP": int(small["fp"].sum()),
+            "FN": int(small["fn"].sum()), "TN": int(small["tn"].sum()),
+        })
+        pooled_row = pd.DataFrame([{
+            "group_id": f"(small groups, n<{min_support}: {len(small)} groups)", **pooled
+        }])
+        large = pd.concat([large, pooled_row], ignore_index=True)
+
+    if top_k is not None:
+        large = large.head(top_k + 1)
+
+    out = pd.concat([large, total_row], ignore_index=True)
+    logger.info(
+        "Per-group F1: %d group(s) with n>=%d listed, %d pooled as small",
+        len(large) - (0 if small.empty else 1), min_support, len(small),
+    )
+    return out[[c for c in table.columns if c in out.columns]]
 
 
 def extract_unit(value: Any) -> str:
@@ -233,22 +283,41 @@ def error_analysis(
                 "share_of_entity_errors", "same_number_diff_unit"]]
 
 
+def macro_f1(by_entity: pd.DataFrame) -> float:
+    """Unweighted mean of per-entity F1 -- the class-balanced view.
+
+    The overall (micro) F1 is dominated by ``item_weight``, which is 38.95% of
+    the data. Macro F1 weights all eight entities equally, so it is the number
+    that actually moves when class-weighted training helps a rare entity. Both
+    are reported.
+    """
+    body = by_entity[by_entity["entity_name"] != "TOTAL"]
+    return float(body["f1"].mean()) if not body.empty else 0.0
+
+
 def evaluate(
     y_true: Sequence[Any],
     y_pred: Sequence[Any],
     entity_names: Sequence[Any],
+    group_ids: Sequence[Any] | None = None,
     top_k: int = 20,
 ) -> dict[str, Any]:
-    """Everything at once: overall scores plus the three breakdown tables."""
-    return {
+    """Everything at once: overall scores plus every breakdown table."""
+    by_entity = f1_by_entity(y_true, y_pred, entity_names)
+    result = {
         "overall": f1_score(y_true, y_pred),
-        "by_entity": f1_by_entity(y_true, y_pred, entity_names),
+        "macro_f1": macro_f1(by_entity),
+        "by_entity": by_entity,
         "by_unit": f1_by_unit(y_true, y_pred, entity_names),
         "errors": error_analysis(y_true, y_pred, entity_names, top_k=top_k),
     }
+    if group_ids is not None:
+        result["by_group"] = f1_by_group(y_true, y_pred, group_ids)
+    return result
 
 
 __all__ = [
     "classify", "classify_all", "f1_score", "f1_by_entity", "f1_by_unit",
-    "error_analysis", "evaluate", "extract_unit", "OUTCOMES",
+    "f1_by_group", "macro_f1", "error_analysis", "evaluate", "extract_unit",
+    "OUTCOMES",
 ]

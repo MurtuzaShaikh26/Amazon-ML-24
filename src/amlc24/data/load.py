@@ -97,6 +97,32 @@ def _read_csv_cached(source: Path, use_cache: bool = True) -> pd.DataFrame:
     return df
 
 
+def _ensure_index(df: pd.DataFrame, name: str) -> pd.DataFrame:
+    """Guarantee an ``index`` column, synthesising it from row position.
+
+    The 2024 ``train.csv`` ships **without** an ``index`` column (only
+    ``test.csv`` has one, because that is what the submission joins on). We
+    therefore derive the id from the 0-based row position in the file.
+
+    That is deterministic for a fixed file, which is all the frozen split needs
+    -- but it does mean the split is tied to this exact ``train.csv``. If the
+    organisers reissue the file with rows added or reordered, the ids shift and
+    ``verify_split`` will fail loudly, which is the correct outcome: the eval
+    set would no longer be the same 5,000 products.
+    """
+    if "index" in df.columns:
+        return df
+
+    df = df.reset_index(drop=True).copy()
+    df.insert(0, "index", range(len(df)))
+    logger.info(
+        "%s has no `index` column; synthesised one from row position (0..%d). "
+        "The frozen split is keyed to this file's row order.",
+        name, len(df) - 1,
+    )
+    return df
+
+
 def _validate(df: pd.DataFrame, expected: list[str], name: str) -> None:
     missing = [c for c in expected if c not in df.columns]
     if missing:
@@ -112,6 +138,7 @@ def load_train(use_cache: bool = True) -> pd.DataFrame:
     """Load ``train.csv``. Asserts ``entity_value`` is present."""
     source = _find_csv("train.csv")
     df = _read_csv_cached(source, use_cache)
+    df = _ensure_index(df, "train.csv")
     _validate(df, TRAIN_COLUMNS, "train.csv")
 
     if "entity_value" not in df.columns:
@@ -136,6 +163,7 @@ def load_test(use_cache: bool = True) -> pd.DataFrame:
     """
     source = _find_csv("test.csv")
     df = _read_csv_cached(source, use_cache)
+    df = _ensure_index(df, "test.csv")
     _validate(df, TEST_COLUMNS, "test.csv")
 
     if "entity_value" in df.columns:

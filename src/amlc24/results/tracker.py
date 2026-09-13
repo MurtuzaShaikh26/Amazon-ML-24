@@ -35,8 +35,9 @@ logger = logging.getLogger(__name__)
 
 LEADERBOARD_COLUMNS = [
     "run_id", "timestamp", "description", "model", "quant_bits", "lora_r",
-    "n_train", "n_eval", "epochs", "lr", "max_pixels", "f1_raw", "f1_post",
-    "precision", "recall", "train_seconds", "config_hash", "notes",
+    "n_train", "n_eval", "epochs", "lr", "max_pixels", "class_weights",
+    "f1_raw", "f1_post", "macro_f1_post", "precision", "recall",
+    "train_seconds", "config_hash", "notes",
 ]
 
 
@@ -111,7 +112,8 @@ class RunTracker:
         return path
 
     def save_predictions(self, predictions: pd.DataFrame) -> Path:
-        columns = [c for c in ("index", "entity_name", "y_true", "y_pred_raw", "y_pred_post")
+        columns = [c for c in ("index", "entity_name", "group_id", "y_true",
+                               "y_pred_raw", "y_pred_post")
                    if c in predictions.columns]
         return self.save_table(predictions[columns], "predictions_eval")
 
@@ -140,8 +142,14 @@ class RunTracker:
             "epochs": cfg.get("train", {}).get("num_train_epochs", ""),
             "lr": cfg.get("train", {}).get("learning_rate", ""),
             "max_pixels": int(cfg.get("processor", {}).get("max_pixels_tokens", 0)) * 28 * 28,
+            "class_weights": (
+                cfg.get("train", {}).get("class_weights", {}).get("scheme", "none")
+                if cfg.get("train", {}).get("class_weights", {}).get("enabled", False)
+                else "none"
+            ),
             "f1_raw": round(float(raw.get("f1", 0.0)), 5),
             "f1_post": round(float(post.get("f1", 0.0)), 5) if post else "",
+            "macro_f1_post": round(float(metrics.get("macro_f1_post", 0.0)), 5),
             "precision": round(float(headline.get("precision", 0.0)), 5),
             "recall": round(float(headline.get("recall", 0.0)), 5),
             "train_seconds": round(float(train_seconds), 1) if train_seconds else "",
@@ -150,13 +158,17 @@ class RunTracker:
         }
 
         LEADERBOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
+        existing = None
         if LEADERBOARD_PATH.exists():
-            board = pd.read_csv(LEADERBOARD_PATH)
-            board = board[board["run_id"] != self.run_id]
-        else:
-            board = pd.DataFrame(columns=LEADERBOARD_COLUMNS)
+            existing = pd.read_csv(LEADERBOARD_PATH)
+            existing = existing[existing["run_id"] != self.run_id]
 
-        board = pd.concat([board, pd.DataFrame([row])], ignore_index=True)
+        new_row = pd.DataFrame([row])
+        # Concatenating onto a header-only frame makes pandas warn about
+        # all-NA column dtypes, so skip the concat when there is nothing to keep.
+        board = new_row if existing is None or existing.empty else pd.concat(
+            [existing, new_row], ignore_index=True
+        )
         board = board.reindex(columns=LEADERBOARD_COLUMNS)
         board.to_csv(LEADERBOARD_PATH, index=False)
 

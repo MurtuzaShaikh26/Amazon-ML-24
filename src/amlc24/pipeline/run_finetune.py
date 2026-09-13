@@ -21,13 +21,25 @@ from ..data.images import download_for_frames, filter_to_available
 from ..data.load import load_split_frames, load_train
 from ..data.splits import get_or_create_split
 from ..logging_utils import add_file_handler, remove_handler, setup_logging
-from ..metrics.f1 import error_analysis, f1_by_entity, f1_by_unit, f1_score
+from ..metrics.f1 import (
+    error_analysis,
+    f1_by_entity,
+    f1_by_group,
+    f1_by_unit,
+    f1_score,
+    macro_f1,
+)
 from ..paths import IMAGE_DIR, describe, ensure_dirs
 from ..postprocess.normalize import PostprocessOptions, apply_postprocess
 from ..results.tracker import RunTracker
 from ..seed import set_seed
 
 logger = logging.getLogger(__name__)
+
+
+def _fmt4(value: float) -> str:
+    """pandas >= 2 requires float_format to be a callable."""
+    return f"{value:.4f}"
 
 
 def prepare_data(
@@ -111,6 +123,22 @@ def score(
     by_entity = by_entity.merge(by_entity_raw, on="entity_name", how="left")
     by_entity["f1_delta_from_postprocess"] = by_entity["f1"] - by_entity["f1_raw"]
 
+    # Macro F1 weights all eight entities equally. Micro (overall) F1 is
+    # dominated by item_weight at 38.95% of the data, so macro is the number
+    # that actually reflects whether class-weighted training helped.
+    macro_post = macro_f1(by_entity)
+    macro_raw = macro_f1(by_entity_raw.rename(columns={"f1_raw": "f1"}))
+    logger.info(
+        "Macro F1 (unweighted mean over entities): raw=%.4f post=%.4f  |  "
+        "micro F1: raw=%.4f post=%.4f",
+        macro_raw, macro_post, raw_scores["f1"], post_scores["f1"],
+    )
+
+    by_group = None
+    if "group_id" in predictions.columns:
+        by_group = f1_by_group(y_true, post_preds, predictions["group_id"].tolist())
+        tracker.save_table(by_group, "f1_by_group")
+
     tracker.save_predictions(predictions)
     tracker.save_table(by_entity, "f1_by_entity")
     tracker.save_table(by_unit, "f1_by_unit")
@@ -120,9 +148,12 @@ def score(
         "raw": raw_scores,
         "post": post_scores,
         "f1_delta": delta,
+        "macro_f1_raw": macro_raw,
+        "macro_f1_post": macro_post,
         "postprocess_rules": dict(rule_counts),
         "by_entity": by_entity,
         "by_unit": by_unit,
+        "by_group": by_group,
         "errors": errors,
         "predictions": predictions,
     }
@@ -208,6 +239,8 @@ def run_finetune(
             "skip_training": skip_training,
             "raw": results["raw"],
             "post": results["post"],
+            "macro_f1_raw": results["macro_f1_raw"],
+            "macro_f1_post": results["macro_f1_post"],
             "f1_delta_from_postprocess": results["f1_delta"],
             "postprocess_rules": results["postprocess_rules"],
             "train": train_stats,
@@ -228,10 +261,14 @@ def run_finetune(
 
         logger.info("=" * 72)
         logger.info(
-            "RUN %s COMPLETE  |  F1 raw=%.4f  post=%.4f  (P=%.4f R=%.4f)",
+            "RUN %s COMPLETE  |  micro F1 raw=%.4f post=%.4f  |  macro F1 post=%.4f  "
+            "(P=%.4f R=%.4f)",
             cfg.run_id, results["raw"]["f1"], results["post"]["f1"],
+            results["macro_f1_post"],
             results["post"]["precision"], results["post"]["recall"],
         )
+        logger.info("Per-entity F1:\n%s", results["by_entity"].to_string(
+            index=False, float_format=_fmt4))
         logger.info("=" * 72)
 
         return {

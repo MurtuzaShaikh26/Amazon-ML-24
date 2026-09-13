@@ -18,12 +18,18 @@ against; every split here is carved out of ``train.csv``.
 
 Stratification key
 ------------------
-``entity_name`` x ``is_empty(entity_value)``, optionally crossed with a coarse
-log-magnitude bin of the numeric value. Empty-value rows are a distinct
-population (they drive the FN/TN terms of the metric) so they must be
-represented proportionally. Strata smaller than ``MIN_STRATUM`` are merged into
-a per-entity ``__rare__`` bucket, because a stratum of 3 cannot be split
-proportionally in any meaningful way.
+``entity_name`` x ``is_empty(entity_value)``, crossed with a coarse
+log-magnitude bin of the numeric value where strata stay large enough.
+
+Undersized strata are merged by dropping key components from the right, never
+across an ``entity_name`` or emptiness boundary -- see ``build_stratum_key``.
+That keeps entity proportions matching to within 1 percentage point, which is
+asserted, because per-entity F1 is only comparable across runs when every split
+carries the same entity mix.
+
+On the real ``train.csv`` the emptiness axis is degenerate: the EDA found
+**zero** empty labels in all 263,859 rows. The axis is kept because it costs
+nothing and guards against a future file that does contain them.
 """
 
 from __future__ import annotations
@@ -40,6 +46,11 @@ import pandas as pd
 from ..paths import REPO_ROOT, SPLITS_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def _fmt3(value: float) -> str:
+    """pandas >= 2 requires float_format to be a callable."""
+    return f"{value:.3f}"
 
 MIN_STRATUM = 10
 PROPORTION_TOLERANCE_PP = 1.0  # percentage points
@@ -298,7 +309,7 @@ def make_splits(
 
     table = entity_proportion_table(df, eval_df, train_subset)
     _assert_proportions(table, tolerance_pp)
-    logger.info("Split comparison table:\n%s", table.to_string(index=False, float_format="%.3f"))
+    logger.info("Split comparison table:\n%s", table.to_string(index=False, float_format=_fmt3))
 
     return {
         "seed": seed,

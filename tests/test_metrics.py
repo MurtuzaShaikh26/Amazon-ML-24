@@ -8,9 +8,12 @@ import pytest
 from amlc24.metrics.f1 import (
     classify,
     error_analysis,
+    evaluate,
     f1_by_entity,
+    f1_by_group,
     f1_by_unit,
     f1_score,
+    macro_f1,
 )
 
 
@@ -163,3 +166,84 @@ def test_error_analysis_returns_empty_frame_when_perfect():
 def test_error_analysis_marks_value_errors_as_not_recoverable():
     errors = error_analysis(["10 gram"], ["11 gram"], ["item_weight"])
     assert bool(errors.iloc[0]["same_number_diff_unit"]) is False
+
+
+# --- macro F1 (class-balanced view) ----------------------------------------
+def test_macro_f1_weights_every_entity_equally():
+    """Micro F1 is dominated by item_weight (38.95% of the data); macro is the
+    number that moves when class weighting helps a rare entity."""
+    y_true = ["1 gram"] * 9 + ["5 volt"]
+    y_pred = ["1 gram"] * 9 + ["9 volt"]          # the rare class is wrong
+    entities = ["item_weight"] * 9 + ["voltage"]
+
+    micro = f1_score(y_true, y_pred)["f1"]
+    macro = macro_f1(f1_by_entity(y_true, y_pred, entities))
+
+    assert micro == pytest.approx(0.9473684, abs=1e-6)
+    assert macro == pytest.approx(0.5), "one perfect + one zero entity -> 0.5"
+    assert macro < micro, "macro must expose the rare-class failure micro hides"
+
+
+def test_macro_f1_equals_micro_when_entities_are_balanced_and_equal():
+    y = ["1 gram", "5 volt"]
+    entities = ["item_weight", "voltage"]
+    assert macro_f1(f1_by_entity(y, y, entities)) == pytest.approx(1.0)
+
+
+def test_macro_f1_excludes_the_total_row():
+    table = f1_by_entity(["1 gram", "5 volt"], ["1 gram", "5 volt"],
+                         ["item_weight", "voltage"])
+    assert "TOTAL" in set(table["entity_name"])
+    assert macro_f1(table) == pytest.approx(1.0)
+
+
+# --- per-group (category-wise) ---------------------------------------------
+def test_f1_by_group_breaks_down_by_product_category():
+    y_true = ["1 gram"] * 4
+    y_pred = ["1 gram", "1 gram", "9 gram", "9 gram"]
+    groups = [100, 100, 200, 200]
+
+    table = f1_by_group(y_true, y_pred, groups, min_support=1).set_index("group_id")
+    assert table.loc["100", "f1"] == pytest.approx(1.0)
+    assert table.loc["200", "f1"] == pytest.approx(0.0)
+    assert table.loc["TOTAL", "n"] == 4
+
+
+def test_f1_by_group_pools_small_categories():
+    """750 groups with a long tail would otherwise produce mostly noise."""
+    y_true = ["1 gram"] * 30
+    y_pred = ["1 gram"] * 30
+    groups = [1] * 25 + list(range(100, 105))     # one big group, five singletons
+
+    table = f1_by_group(y_true, y_pred, groups, min_support=10)
+    labels = set(table["group_id"])
+    assert "1" in labels
+    pooled = [l for l in labels if l.startswith("(small groups")]
+    assert len(pooled) == 1, "the five singleton groups must be pooled into one row"
+    assert table[table["group_id"].isin(pooled)]["n"].iloc[0] == 5
+
+
+def test_f1_by_group_totals_match_the_overall_score():
+    y_true = ["1 gram", "2 gram", "3 gram"]
+    y_pred = ["1 gram", "9 gram", "3 gram"]
+    groups = [1, 2, 3]
+
+    table = f1_by_group(y_true, y_pred, groups, min_support=1)
+    total = table[table["group_id"] == "TOTAL"].iloc[0]
+    assert total["f1"] == pytest.approx(f1_score(y_true, y_pred)["f1"])
+
+
+# --- evaluate() ------------------------------------------------------------
+def test_evaluate_returns_every_breakdown():
+    y_true = ["1 gram", "5 volt"]
+    y_pred = ["1 gram", "9 volt"]
+    entities = ["item_weight", "voltage"]
+
+    result = evaluate(y_true, y_pred, entities, group_ids=[1, 2])
+    assert {"overall", "macro_f1", "by_entity", "by_unit", "errors", "by_group"} <= set(result)
+    assert isinstance(result["macro_f1"], float)
+
+
+def test_evaluate_omits_group_table_when_no_group_ids_given():
+    result = evaluate(["1 gram"], ["1 gram"], ["item_weight"])
+    assert "by_group" not in result

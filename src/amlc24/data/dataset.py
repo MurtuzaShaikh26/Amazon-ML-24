@@ -88,6 +88,7 @@ class QwenVLCollator:
         include_allowed_units: bool = True,
         max_length: int = 1024,
         is_train: bool = True,
+        class_weights: dict[str, float] | None = None,
     ):
         self.processor = processor
         self.tokenizer = getattr(processor, "tokenizer", processor)
@@ -95,6 +96,9 @@ class QwenVLCollator:
         self.include_allowed_units = include_allowed_units
         self.max_length = max_length
         self.is_train = is_train
+        # Empty/None means "unweighted"; the trainer then takes the cheap path
+        # and uses the model's own loss.
+        self.class_weights = class_weights or {}
         self._image_token_ids = self._resolve_image_token_ids()
 
     def _resolve_image_token_ids(self) -> set[int]:
@@ -143,6 +147,11 @@ class QwenVLCollator:
 
         if self.is_train:
             batch["labels"] = self._build_labels(batch, prompts, images)
+            if self.class_weights:
+                batch["sample_weight"] = torch.tensor(
+                    [float(self.class_weights.get(f["entity_name"], 1.0)) for f in features],
+                    dtype=torch.float32,
+                )
         else:
             batch["row_index"] = torch.tensor([f["index"] for f in features], dtype=torch.long)
 
@@ -209,7 +218,7 @@ def build_datasets(
     cfg: Any,
     image_dir: Any = None,
     eval_loss_fraction: float | None = None,
-) -> tuple[EntityExtractionDataset, EntityExtractionDataset]:
+) -> tuple["EntityExtractionDataset", "EntityExtractionDataset"]:
     """Construct the training dataset and the eval-loss dataset.
 
     ``eval_loss_fraction`` subsamples the eval set used for *loss* during

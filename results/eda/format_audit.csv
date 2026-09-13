@@ -1,0 +1,15 @@
+property,count,pct,note
+non_empty_values,263859,100.0,denominator for every percentage below
+integer_no_decimal_point,20833,7.895504796122172,written with no '.' at all
+decimal_point_present,243026,92.10449520387783,written with a fractional part
+trailing_dot_zero,167073,63.31904539924732,"e.g. '2.0' -- if ~0, never emit '.0' in predictions"
+trailing_zeros_after_decimal,0,0.0,e.g. '12.50' -- tells us whether to strip trailing zeros
+thousands_separator,3276,1.2415722033358727,"e.g. '1,000' -- if ~0, never emit commas"
+leading_zero,0,0.0,e.g. '012' -- would break naive float round-tripping
+range_value,0,0.0,e.g. '10 to 20 gram' -- handled by postprocess.range_rule
+unparseable_number,3276,1.2415722033358727,number head did not parse as a float
+missing_unit,0,0.0,value has no unit token at all
+multiword_unit,5914,2.2413485990623783,"e.g. 'fluid ounce', 'cubic foot' -- parser must not split on space"
+uppercase_present,0,0.0,labels are expected lowercase; uppercase means normalisation risk
+unit_outside_allowed_list,4331,1.641406963567663,unit not in constants.py for that entity
+invalid_unit_but_canonicalisable,0,0.0,our alias table would rescue these

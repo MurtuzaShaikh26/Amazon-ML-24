@@ -61,14 +61,17 @@ than rediscovered.
 
 * **Blank rather than guess.** An unparseable or invalid output becomes `""`.
   Empty costs one FN; a wrong non-empty answer costs an FP *and* precision.
-* **`range_rule` defaults to `blank`** as specified, with `max`/`min`
-  available; how often it fires is counted and logged.
+* **`range_rule` now defaults to `bracket`**, not `blank`. The spec said
+  `blank`, but the EDA found zero empty labels, which makes blanking provably
+  losing (an FN and an FP cost the same), and found that the labels' own range
+  notation is `[100.0, 240.0] volt`. `blank`/`max`/`min` remain available; how
+  often the rule fires is counted and logged.
 * **Ranges are detected before single values**, otherwise `"10 to 20 gram"`
   parses as a confident `"10 gram"`.
-* **Number formatting**: no thousands separators, no trailing zeros, integers
-  without `.0` — but this is a *hypothesis to check against the EDA format
-  audit*, not an assumption. `run000_eda.ipynb` prints the audit prominently;
-  if the real labels disagree, change `format_number` and re-run.
+* **Number formatting**: the scaffolding guessed "integers without `.0`".
+  **The EDA disproved this** — 92.01% of labels are `str(float(x))`, so the
+  default is now `number_format: float`. See Run 000 below. This is exactly why
+  the audit exists rather than an assumption.
 * **`constants.py` is parsed with `ast.literal_eval`, never imported**, so a
   tampered dataset file cannot execute code. A built-in fallback copy is used
   when the file is absent, and any drift between the two is logged as a warning.
@@ -116,14 +119,162 @@ than rediscovered.
 
 ### Open questions
 
-* Is the ~6% empty-value rate real, or an artefact of how the CSV was exported?
-  The metric rewards abstention, so this directly affects the recall target.
-* Duplicate `image_link`s mean one photo can back several entities. The current
-  split stratifies on entity/emptiness but **does not group by image**, so the
-  same photo can appear in both train and eval with different entities. Worth
-  measuring whether that inflates the score.
+* ~~Is the empty-value rate real?~~ **Answered:** it is 0.00%. See Run 000.
+* Duplicate `image_link`s mean one photo can back several entities. The split
+  stratifies on entity/emptiness but **does not group by image**, so the same
+  photo can appear in both train and eval under different entities. The EDA
+  says this affects a small share (255,906 distinct images for 263,859 rows,
+  so ~3% sharing), but it is still unmeasured leakage.
 * Is 256 visual tokens enough to read small print on packaging? Worth an
   ablation at 384 or 512 if VRAM allows at 4-bit.
+* Does class weighting help macro F1 enough to justify any micro F1 it costs?
+  One config flip to test.
+* `reject_invalid_units` blanks ~0.2% of predictions whose label is literally
+  that invalid unit (`item_volume` / `ounce`). Worth an ablation, though keeping
+  it is safer for the competition's own sanity checker.
+
+---
+
+## Run 000 — EDA on the real `train.csv` (2026-09-14)
+
+263,859 rows, 8 entities, 750 groups. Ran before any training, and it changed
+four decisions. Full tables in `results/eda/`.
+
+### 1. The number format assumption was wrong — and it was the expensive kind
+
+The scaffolding guessed that labels were written without a trailing `.0`. They
+are not:
+
+| number shape | share | example |
+|---|---|---|
+| `d.0` (trailing `.0`) | **64.12%** | `500.0 gram` |
+| real decimal | **27.89%** | `3.53 ounce` |
+| bare integer | 7.99% | `50 gram` |
+
+**92.01% of labels are exactly `str(float(x))`.** Six of the eight entities
+(depth, height, item_volume, voltage, wattage, width) are *100%* float-style
+with not one bare integer; only `item_weight` (18.9% bare) and
+`maximum_weight_recommendation` (49.9% bare) mix the two.
+
+The original `format_number` stripped `.0`, so it would have converted a
+correct `500.0 gram` into `500 gram` — a false positive on ~92% of otherwise
+correct predictions. Measured directly: feeding the ground-truth labels through
+normalisation and checking how many survive unchanged,
+
+* old (`int`) behaviour: **35.17%**
+* new (`float`) default: **90.66%**
+* with the bracket range rule too: **91.80%**
+
+This is the single largest score lever in the repo and it came from the EDA, not
+from the model. `number_format` is now a config flag defaulting to `float`.
+
+The residual 7.99% is irreducible: nothing in the number itself says whether a
+given item's label is `50` or `50.0`. Picking the 92% convention is the best
+available single choice.
+
+### 2. There are **zero** empty labels
+
+Empty-value rate is 0.00% across all 263,859 rows. Two consequences:
+
+* The emptiness axis of the stratification key is degenerate. Kept anyway — it
+  costs nothing and guards a future file that does have them.
+* **Blanking is never optimal.** With no empty ground truth, an empty
+  prediction is always a false negative, and `F1 = 2TP/(2TP+FP+FN)` charges an
+  FN and an FP identically. So a guess weakly dominates a blank: it costs the
+  same when wrong and scores when right. The original `range_rule: blank`
+  default was therefore provably losing.
+
+### 3. Ranges use bracket notation, which the parser missed entirely
+
+The labels write ranges as `[100.0, 240.0] volt` (3,276 rows, 1.24%), plus a
+few hundred as `10 kilogram to 15 kilogram`. The original regex matched neither.
+
+Since the truth *is* that bracket string, reproducing it can score a true
+positive where blanking never can — so `range_rule` now defaults to `bracket`
+and round-trips the dataset's exact notation. `blank`/`max`/`min` remain.
+
+### 4. `entity_name` is heavily skewed — 31.5x
+
+| entity | rows | share |
+|---|---|---|
+| item_weight | 102,786 | 38.95% |
+| depth | 45,127 | 17.10% |
+| width | 44,183 | 16.74% |
+| height | 43,597 | 16.52% |
+| voltage | 9,466 | 3.59% |
+| wattage | 7,755 | 2.94% |
+| item_volume | 7,682 | 2.91% |
+| maximum_weight_recommendation | 3,263 | **1.24%** |
+
+Unweighted, ~72% of the gradient comes from weight-and-dimension rows, and the
+two entities with the most unit ambiguity (`item_volume` has 13 allowed units,
+the most of any) get the least signal. Hence the class-weighted loss below.
+
+### Other findings
+
+* **`train.csv` has no `index` column** (only `test.csv` does). It is
+  synthesised from row position, which is deterministic for a fixed file —
+  but it ties the frozen split to this exact `train.csv`. If the organisers
+  reissue it with rows added or reordered, ids shift and `verify_split` fails
+  loudly, which is correct: the eval set would no longer be the same products.
+* **Ground truth contains units outside `constants.py`** — 4,331 rows (1.64%),
+  mostly `item_volume` labelled `ounce` (300 rows) where only `fluid ounce` is
+  allowed. So `reject_invalid_units` can blank a prediction that exactly matches
+  its label. Kept on (an invalid unit fails the competition's own sanity
+  checker) but it is a measured ~0.2% local cost, and it is toggleable.
+* **Image dedup saves only 3.0%** — 255,906 distinct images for 263,859 rows,
+  far less sharing than assumed. The download is ~15k images either way.
+* 5,914 labels (2.24%) use multi-word units (`fluid ounce`, `cubic foot`), so
+  the parser must not split the unit on whitespace.
+
+### What I changed as a result
+
+1. `format_number` → float style, config flag `number_format` (default `float`)
+2. `range_rule` → `bracket` default, with bracket-notation parsing added
+3. Class-weighted loss (`train.class_weights`, `sqrt_inverse`)
+4. Macro F1 + per-`group_id` breakdown added to every run's output
+
+---
+
+## Class-weighted loss
+
+`train/weighting.py`. Per-sample loss multiplier keyed on `entity_name`,
+normalised to mean 1.0 over the training distribution so the scheme changes the
+*balance* between classes but not the overall loss scale — and therefore does
+not implicitly change the effective learning rate.
+
+Schemes: `none`, `inverse`, `sqrt_inverse` (default), `effective`
+(Cui et al. 2019). On the actual 10k training subset:
+
+| entity | n | `sqrt_inverse` | `inverse` |
+|---|---|---|---|
+| item_weight | 3,896 | 0.642 | 0.381 |
+| depth / width / height | ~1,680 | ~0.98 | ~0.88 |
+| voltage | 359 | 2.114 | 3.807 |
+| wattage | 293 | 2.340 | 3.807 |
+| item_volume | 292 | 2.344 | 3.807 |
+| maximum_weight_recommendation | 124 | **3.598** | 3.807 |
+| **spread** | | **5.61x** | 10.0x (capped) |
+
+**Why `sqrt_inverse` is the default.** Full `inverse` gives the rarest class a
+~31x multiplier before capping. At `per_device_train_batch_size=1`, each
+micro-batch is a single sample, so that multiplier lands on the whole gradient
+for that step — and under fp16 the resulting magnitude swings are a loss-spike
+and overflow risk. The square root keeps the largest multiplier near 5.6x,
+which rebalances meaningfully without destabilising the run.
+
+**Implementation note.** At batch size 1 the weighted loss is just
+`outputs.loss * w` — no second forward, no extra logits copy. The general
+per-sample path (`reduction="none"`) exists for batch > 1 but materialises an
+fp32 view of a 152k-vocab logits tensor, which is why batch size 1 is a
+correctness-adjacent choice here and not merely a memory convenience. Both
+paths are tested against hand computation in `tests/test_weighted_loss.py`,
+including that gradients scale linearly with the weight.
+
+**Open question:** whether weighting actually helps. It should raise *macro* F1
+(all entities equal) at some cost to *micro* F1 (dominated by `item_weight`).
+Both are now reported every run, and `class_weights` is on the leaderboard, so
+the ablation is a config flip: set `train.class_weights.enabled: false`.
 
 ---
 

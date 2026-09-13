@@ -62,6 +62,21 @@ train:
   # always uses all 5,000 rows.
   eval_loss_fraction: 0.1
 
+  # Class-weighted loss. The EDA found a 31.5x imbalance across entity_name
+  # (item_weight 38.95% vs maximum_weight_recommendation 1.24%), so unweighted
+  # training spends ~72% of its gradient on weight-and-dimension rows.
+  #
+  # sqrt_inverse caps the largest multiplier near 5.6x. Full `inverse` would
+  # hand the rarest class a 31x multiplier, which at batch size 1 makes
+  # gradient magnitude swing hard between micro-batches -- an fp16 loss-spike
+  # risk. Weights are normalised to mean 1.0 so the scheme does not implicitly
+  # change the effective learning rate.
+  class_weights:
+    enabled: true
+    scheme: sqrt_inverse    # none | inverse | sqrt_inverse | effective
+    beta: 0.999             # only used by scheme: effective
+    max_weight: 10.0        # cap before normalisation
+
 prompt:
   template: prompt_v1
   include_allowed_units: true
@@ -78,4 +93,19 @@ postprocess:
   normalize_numbers: true
   reject_invalid_units: true
   infer_missing_unit: true
-  range_rule: blank            # blank | max | min
+
+  # MEASURED from the EDA format audit over all 263,859 labels, not assumed:
+  #   64.12% trailing '.0'  (500.0 gram)
+  #   27.89% real decimals  (3.53 ounce)
+  #    7.99% bare integers  (50 gram)
+  # => 92.01% are exactly str(float(x)). Six of eight entities are 100%
+  # float-style. Emitting bare integers instead would be wrong on ~92% of
+  # otherwise-correct predictions.
+  number_format: float         # float | int | strip
+
+  # train.csv contains ZERO empty labels, so an empty prediction is always a
+  # false negative, and F1 = 2TP/(2TP+FP+FN) charges FN and FP identically.
+  # Blanking is therefore weakly dominated by guessing. Ranges appear in the
+  # labels as "[100.0, 240.0] volt" (1.24% of rows), so reproducing that exact
+  # notation can score a true positive where blanking never can.
+  range_rule: bracket          # bracket | blank | max | min

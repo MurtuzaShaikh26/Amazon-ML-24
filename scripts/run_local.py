@@ -29,6 +29,16 @@ from amlc24.paths import describe, ensure_dirs  # noqa: E402
 from amlc24.pipeline.run_eda import run_eda  # noqa: E402
 from amlc24.results.tracker import init_leaderboard, read_leaderboard  # noqa: E402
 
+
+def _fmt3(value: float) -> str:
+    """pandas >= 2 requires float_format to be a callable."""
+    return f"{value:.3f}"
+
+
+def _fmt4(value: float) -> str:
+    """pandas >= 2 requires float_format to be a callable."""
+    return f"{value:.4f}"
+
 logger = get_logger(__name__)
 
 
@@ -59,7 +69,7 @@ def cmd_splits(args: argparse.Namespace) -> int:
     table = split.get("proportion_table")
     if table is not None and hasattr(table, "to_string"):
         print("\n=== entity_name proportions ===")
-        print(table.to_string(index=False, float_format="%.3f"))
+        print(table.to_string(index=False, float_format=_fmt3))
     return 0
 
 
@@ -77,7 +87,7 @@ def cmd_train(args: argparse.Namespace) -> int:
     print(f"  raw  : {result['raw']['f1']:.4f}")
     print(f"  post : {result['post']['f1']:.4f}  ({result['f1_delta']:+.4f})")
     print("\n=== per entity ===")
-    print(result["by_entity"].to_string(index=False, float_format="%.4f"))
+    print(result["by_entity"].to_string(index=False, float_format=_fmt4))
     return 0
 
 

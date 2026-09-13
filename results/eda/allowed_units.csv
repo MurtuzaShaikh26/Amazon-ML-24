@@ -1,0 +1,9 @@
+entity_name,allowed_units,n_units
+depth,"centimetre, foot, inch, metre, millimetre, yard",6
+height,"centimetre, foot, inch, metre, millimetre, yard",6
+item_volume,"centilitre, cubic foot, cubic inch, cup, decilitre, fluid ounce, gallon, imperial gallon, litre, microlitre, millilitre, pint, quart",13
+item_weight,"gram, kilogram, microgram, milligram, ounce, pound, ton",7
+maximum_weight_recommendation,"gram, kilogram, microgram, milligram, ounce, pound, ton",7
+voltage,"kilovolt, millivolt, volt",3
+wattage,"kilowatt, watt",2
+width,"centimetre, foot, inch, metre, millimetre, yard",6

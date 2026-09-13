@@ -40,6 +40,10 @@ train:
   fp16: true
   gradient_checkpointing: true
   logging_steps: 25
+  # 31.5x entity imbalance measured in the EDA -- see configs/base.yaml.
+  class_weights:
+    enabled: true
+    scheme: sqrt_inverse
 
 prompt:
   template: prompt_v1
@@ -53,4 +57,6 @@ postprocess:
   enabled: true
   normalize_units: true
   reject_invalid_units: true
-  range_rule: blank
+  # Both values below are driven by the EDA, not by assumption -- see base.yaml.
+  number_format: float
+  range_rule: bracket

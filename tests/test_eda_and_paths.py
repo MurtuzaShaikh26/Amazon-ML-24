@@ -158,9 +158,20 @@ def test_profile_tables_are_saved_as_csv(synthetic_train_df, tmp_path):
 
 # --- leaderboard -----------------------------------------------------------
 def test_leaderboard_columns_match_the_spec():
+    """The spec's columns, plus two the EDA justified adding: `class_weights`
+    (which scheme ran) and `macro_f1_post` (the class-balanced score, which is
+    what actually moves when weighting helps a rare entity)."""
     expected = [
+        "run_id", "timestamp", "description", "model", "quant_bits", "lora_r",
+        "n_train", "n_eval", "epochs", "lr", "max_pixels", "class_weights",
+        "f1_raw", "f1_post", "macro_f1_post", "precision", "recall",
+        "train_seconds", "config_hash", "notes",
+    ]
+    assert LEADERBOARD_COLUMNS == expected
+
+    spec_columns = [
         "run_id", "timestamp", "description", "model", "quant_bits", "lora_r",
         "n_train", "n_eval", "epochs", "lr", "max_pixels", "f1_raw", "f1_post",
         "precision", "recall", "train_seconds", "config_hash", "notes",
     ]
-    assert LEADERBOARD_COLUMNS == expected
+    assert set(spec_columns) <= set(LEADERBOARD_COLUMNS), "no spec column dropped"

@@ -25,6 +25,20 @@ Allowed units per entity are enumerated in the dataset's `src/constants.py`.
 two-column CSV (`index`, `prediction`); predict the empty string when no value
 is found.
 
+### What the data actually looks like
+
+Run `python scripts/run_local.py eda` to regenerate; tables land in
+`results/eda/`. The findings that shaped the code:
+
+| Finding | Value | Consequence |
+|---|---|---|
+| Number format | 92.01% are `str(float(x))` | `number_format: float` |
+| Empty labels | **0.00%** | blanking is never optimal |
+| Ranges | `[100.0, 240.0] volt`, 1.24% | `range_rule: bracket` |
+| `entity_name` skew | **31.5x** | class-weighted loss |
+| `train.csv` `index` column | **absent** | synthesised from row position |
+| Units outside `constants.py` | 1.64% *of the labels* | `reject_invalid_units` costs ~0.2% |
+
 ### Metric: F1 with exact string match
 
 | prediction | ground truth | outcome |
@@ -37,11 +51,19 @@ is found.
 
 `precision = TP/(TP+FP)`, `recall = TP/(TP+FN)`, `F1 = 2PR/(P+R)`.
 
-Exact match means **formatting matters as much as the number**. `"2 gram"` is
-correct; `"2.0 gram"`, `"2 gms"` and `"2 g"` are all wrong. Post-processing is a
-first-class part of the solution, not a tidy-up step — which is why every run
-reports F1 **both raw and post-processed**, so the value of normalisation is a
-measured number rather than an assumption.
+Exact match means **formatting matters as much as the number**. Post-processing
+is a first-class part of the solution, not a tidy-up step — which is why every
+run reports F1 **both raw and post-processed**, so the value of normalisation is
+a measured number rather than an assumption.
+
+> **The formatting convention was measured, not guessed.** The EDA over all
+> 263,859 labels found that **92.01% are exactly `str(float(x))`** — `500.0
+> gram`, not `500 gram`. Six of the eight entities are 100% float-style.
+> Feeding the ground-truth labels back through normalisation, the initial
+> "strip the `.0`" guess reproduced only **35.17%** of them; the measured
+> convention reproduces **91.80%**. That single fix is the largest score lever
+> in the repo, and it came from the EDA rather than the model. See
+> [`NOTES.md`](NOTES.md) → Run 000.
 
 ---
 
@@ -83,16 +105,17 @@ src/amlc24/
   data/            load, eda, splits, images, dataset (+ collator)
   prompts/         versioned prompt templates (prompt_v1, …)
   models/          Qwen2-VL loading, quantisation, LoRA
-  train/           Trainer wiring, completion-only loss
+  train/           Trainer wiring, completion-only loss, class weighting
   inference/       batched greedy generation
   postprocess/     unit vocabulary + normalisation rules
-  metrics/         competition F1, per-entity, per-unit, error analysis
+  metrics/         competition F1: micro + macro, per-entity, per-group,
+                   per-unit, error analysis
   results/         per-run artefacts + leaderboard
   pipeline/        run_eda, run_finetune  ← notebooks call only these
 kaggle_notebook/   thin orchestrators (no logic)
 scripts/           download_images.py, run_local.py
 results/           leaderboard.csv, splits/, runs/, eda/   (committed)
-tests/             200 tests
+tests/             260 tests
 ```
 
 ### Design rules
@@ -101,7 +124,8 @@ tests/             200 tests
   display results.
 * **No hardcoded paths outside `paths.py`.**
 * **`logging`, never `print`, inside `src/`.**
-* **Per-entity F1 in every run's output.**
+* **Per-entity (class-wise) and per-group (category-wise) F1 in every run's
+  output, alongside both micro and macro F1.**
 * **`results/` is committed** — only adapter binaries under
   `results/runs/*/checkpoints/` are ignored.
 
@@ -115,8 +139,9 @@ tests/             200 tests
 pip install -r requirements.txt
 
 # put train.csv / test.csv (and the dataset's src/constants.py) under ./data/
+# note: train.csv has no `index` column; it is synthesised from row position
 
-python -m pytest tests/ -q          # 200 tests, ~1s
+python -m pytest tests/ -q          # 260 tests, ~8s
 python scripts/run_local.py eda     # profile train.csv -> results/eda/
 python scripts/run_local.py splits  # create/verify the frozen 5k split
 python scripts/download_images.py   # ~15k images, resized, resumable
@@ -177,6 +202,24 @@ incidental:
 | `optim` | `paged_adamw_8bit` | Paged states survive fragmentation spikes. |
 | LoRA | `r=16, α=32, dropout=0.05` on `q_proj,k_proj,v_proj,o_proj` | **Language model only** — the vision tower is frozen. |
 | schedule | 3 epochs, cosine, `warmup_ratio=0.03`, `lr=2e-4` | |
+| `train.class_weights` | `sqrt_inverse` | 31.5x entity imbalance (see below). |
+
+### Class-weighted loss
+
+`entity_name` is skewed 31.5x (`item_weight` 38.95% vs
+`maximum_weight_recommendation` 1.24%), so unweighted training spends ~72% of
+its gradient on weight-and-dimension rows. `train.class_weights` applies a
+per-sample loss multiplier, normalised to mean 1.0 so the scheme changes the
+balance between classes without changing the effective learning rate.
+
+`sqrt_inverse` (default) caps the spread at ~5.6x. Full `inverse` would give the
+rarest class a ~31x multiplier — and at batch size 1 that multiplier lands on an
+entire step's gradient, which under fp16 risks loss spikes. Disable with
+`train.class_weights.enabled: false` to run the unweighted ablation.
+
+Because the metric is micro-averaged and `item_weight` dominates it, **macro F1
+is the number that reveals whether weighting worked.** Both are reported every
+run and both are on the leaderboard.
 
 **Loss is computed on completion tokens only.** Prompt tokens, padding, and
 vision placeholders are masked to `-100`. Training on the prompt wastes capacity
@@ -232,8 +275,16 @@ config_hash, notes
 ```
 
 Each `results/runs/{run_id}/` holds `config.yaml`, `metrics.json`,
-`predictions_eval.csv`, `f1_by_entity.csv`, `f1_by_unit.csv`,
-`error_analysis.csv`, `log.txt` and `env.json`.
+`predictions_eval.csv`, `f1_by_entity.csv` (class-wise), `f1_by_group.csv`
+(category-wise), `f1_by_unit.csv`, `error_analysis.csv`, `log.txt` and
+`env.json`.
+
+**Class-wise and category-wise evaluation appear in every run.**
+`f1_by_entity.csv` breaks the score down by `entity_name` with a
+`f1_delta_from_postprocess` column showing which entities normalisation
+rescued; `f1_by_group.csv` does the same by `group_id` (product category),
+pooling groups with fewer than 20 eval rows so the long tail does not become
+noise.
 
 `error_analysis.csv` is the most actionable of these: it ranks the most frequent
 `(predicted, actual)` mismatch pairs per entity and flags the ones that differ

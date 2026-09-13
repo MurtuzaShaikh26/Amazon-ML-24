@@ -1,0 +1,2 @@
+n_distinct_groups,largest_group_id,largest_group_size,largest_group_pct,median_group_size,smallest_group_size,n_groups_with_1_row,n_groups_covering_50pct,n_groups_covering_90pct
+750,459516,9458,3.5844902012059467,103.0,1,2,48,305

@@ -1,0 +1,16 @@
+property,example
+trailing_dot_zero,500.0 gram
+trailing_dot_zero,1.0 cup
+trailing_dot_zero,30.0 kilogram
+trailing_dot_zero,4.0 gallon
+trailing_dot_zero,48.0 volt
+thousands_separator,"[100.0, 240.0] volt"
+thousands_separator,"[8.0, 12.0] fluid ounce"
+thousands_separator,"[85.0, 265.0] volt"
+thousands_separator,"[25.0, 30.0] pound"
+thousands_separator,"[175.0, 265.0] volt"
+multiword_unit,10 kilogram to 15 kilogram
+multiword_unit,3.0 cubic foot
+multiword_unit,"[100.0, 240.0] volt"
+multiword_unit,"[8.0, 12.0] fluid ounce"
+multiword_unit,16.0 fluid ounce

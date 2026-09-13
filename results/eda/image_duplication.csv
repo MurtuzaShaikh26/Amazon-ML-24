@@ -1,0 +1,2 @@
+n_rows,n_distinct_images,n_images_used_once,n_images_used_multiple,n_rows_sharing_an_image,pct_rows_sharing_an_image,max_rows_per_image,mean_rows_per_image,download_saving_pct
+263859,255906,248090,7816,15769,5.976297947009577,4,1.0310778176361632,3.0141098086478024

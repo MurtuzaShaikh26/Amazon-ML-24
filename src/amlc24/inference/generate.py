@@ -128,7 +128,11 @@ def generate_predictions(
                 len(rows), elapsed / 60, len(rows) / max(elapsed, 1e-6))
 
     preds = pd.DataFrame(rows)
-    keep = ["index", "entity_name"] + (["entity_value"] if "entity_value" in frame.columns else [])
+    keep = ["index", "entity_name"]
+    if "group_id" in frame.columns:
+        keep.append("group_id")          # enables the per-category breakdown
+    if "entity_value" in frame.columns:
+        keep.append("entity_value")
     out = frame[keep].merge(preds, on="index", how="left")
     out["y_pred_raw"] = out["y_pred_raw"].fillna("")
 

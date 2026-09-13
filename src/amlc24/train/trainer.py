@@ -25,7 +25,8 @@ from typing import Any
 
 import pandas as pd
 
-from ..data.dataset import QwenVLCollator
+from ..data.dataset import IGNORE_INDEX, QwenVLCollator
+from .weighting import describe_weights, weights_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,67 @@ def build_training_args(cfg: Any, output_dir: str | Path) -> Any:
     return args
 
 
+def _weighted_trainer_class() -> Any:
+    """Build a ``Trainer`` subclass that applies per-sample class weights.
+
+    Two paths, chosen per batch:
+
+    * **Batch size 1** (our configuration) -- the model's own loss is already
+      the mean over that single sample's completion tokens, so the weighted
+      loss is just ``loss * w``. This costs nothing: no second forward, no
+      extra logits copy. With ``gradient_accumulation_steps=8`` the eight
+      weighted micro-batches accumulate into exactly the weighted mean.
+    * **Batch size > 1** -- fall back to recomputing per-token cross-entropy
+      with ``reduction="none"`` so each sample can be scaled independently.
+      This materialises an fp32 view of the logits (vocab ≈ 152k), which is
+      expensive; it is why batch size 1 is the configured default rather than
+      merely a memory convenience.
+    """
+    import torch
+    import torch.nn.functional as F
+    from transformers import Trainer
+
+    class WeightedLossTrainer(Trainer):
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            # Must be removed before forward(): the model does not accept it.
+            weights = inputs.pop("sample_weight", None)
+
+            if weights is None:
+                outputs = model(**inputs)
+                loss = outputs.loss
+                return (loss, outputs) if return_outputs else loss
+
+            weights = weights.to(model.device if hasattr(model, "device") else weights.device)
+
+            if inputs["input_ids"].shape[0] == 1:
+                outputs = model(**inputs)
+                loss = outputs.loss * weights.to(outputs.loss.device).reshape(())
+                return (loss, outputs) if return_outputs else loss
+
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+
+            # Standard causal-LM shift: predict token t+1 from position t.
+            shift_logits = outputs.logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            per_token = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)).float(),
+                shift_labels.view(-1),
+                ignore_index=IGNORE_INDEX,
+                reduction="none",
+            ).view(shift_labels.shape)
+
+            mask = (shift_labels != IGNORE_INDEX).float()
+            per_sample = (per_token * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+            loss = (per_sample * weights.to(per_sample.device)).mean()
+
+            outputs["loss"] = loss
+            return (loss, outputs) if return_outputs else loss
+
+    return WeightedLossTrainer
+
+
 def build_trainer(
     model: Any,
     processor: Any,
@@ -130,8 +192,14 @@ def build_trainer(
     eval_dataset: Any,
     cfg: Any,
     output_dir: str | Path,
+    class_weights: dict[str, float] | None = None,
 ) -> tuple[Any, Any]:
-    """Assemble the ``Trainer``. Returns ``(trainer, loss_history_callback)``."""
+    """Assemble the ``Trainer``. Returns ``(trainer, loss_history_callback)``.
+
+    When ``class_weights`` is non-empty a weighted-loss ``Trainer`` subclass is
+    used and the collator emits a per-sample weight; otherwise the plain
+    ``Trainer`` and the model's own loss are used unchanged.
+    """
     from transformers import Trainer
 
     prompt_cfg = cfg.get("prompt", {})
@@ -141,10 +209,15 @@ def build_trainer(
         include_allowed_units=bool(prompt_cfg.get("include_allowed_units", True)),
         max_length=int(cfg.get("train", {}).get("max_length", 1024)),
         is_train=True,
+        class_weights=class_weights,
     )
 
+    trainer_cls = _weighted_trainer_class() if class_weights else Trainer
+    if class_weights:
+        logger.info("Using weighted-loss Trainer over %d classes", len(class_weights))
+
     callback = _make_callback()
-    trainer = Trainer(
+    trainer = trainer_cls(
         model=model,
         args=build_training_args(cfg, output_dir),
         train_dataset=train_dataset,
@@ -170,8 +243,16 @@ def train(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Class weights are derived from the *training subset's* own distribution,
+    # not the full file, so they match what the optimiser actually sees.
+    train_entities = train_dataset.df["entity_name"].astype(str).tolist()
+    class_weights = weights_from_config(
+        train_entities, cfg.get("train", {}).get("class_weights", {})
+    )
+
     trainer, callback = build_trainer(
-        model, processor, train_dataset, eval_dataset, cfg, output_dir
+        model, processor, train_dataset, eval_dataset, cfg, output_dir,
+        class_weights=class_weights,
     )
 
     logger.info(
@@ -211,6 +292,8 @@ def train(
         "peak_vram_gb": peak_vram_gb,
         "best_checkpoint": getattr(trainer.state, "best_model_checkpoint", None),
         "best_eval_loss": getattr(trainer.state, "best_metric", None),
+        "class_weighted_loss": bool(class_weights),
+        "class_weights": describe_weights(class_weights) if class_weights else None,
     }
 
     with (output_dir / "train_stats.json").open("w", encoding="utf-8") as fh:

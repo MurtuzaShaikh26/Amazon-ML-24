@@ -92,17 +92,37 @@ def test_unknown_units_return_none():
 
 
 # --- number formatting -----------------------------------------------------
+# The EDA format audit over all 263,859 labels found 64.12% trailing '.0',
+# 27.89% real decimals and 7.99% bare integers -- i.e. 92.01% are exactly
+# str(float(x)). "float" is therefore the default style.
 @pytest.mark.parametrize("raw,expected", [
-    ("2", "2"), ("2.0", "2"), ("2.00", "2"), ("2.50", "2.5"), ("2.5", "2.5"),
-    ("0.5", "0.5"), (".5", "0.5"), ("1000", "1000"), ("1,000", "1000"),
-    ("12.345", "12.345"), ("0", "0"), ("2000", "2000"),
+    ("2", "2.0"), ("2.0", "2.0"), ("2.00", "2.0"), ("2.50", "2.5"),
+    ("2.5", "2.5"), ("0.5", "0.5"), (".5", "0.5"), ("1000", "1000.0"),
+    ("1,000", "1000.0"), ("12.345", "12.345"), ("0", "0.0"), ("500", "500.0"),
 ])
-def test_format_number_matches_label_conventions(raw, expected):
+def test_format_number_float_style_matches_label_convention(raw, expected):
     assert format_number(raw) == expected
+    assert format_number(raw, "float") == expected
 
 
-def test_format_number_never_uses_exponent_notation():
-    assert "E" not in format_number("1000000") and "e" not in format_number("1000000")
+@pytest.mark.parametrize("raw,expected", [
+    ("2", "2"), ("2.0", "2"), ("2.00", "2"), ("2.50", "2.5"),
+    ("1,000", "1000"), ("12.345", "12.345"),
+])
+def test_format_number_int_style_still_available(raw, expected):
+    assert format_number(raw, "int") == expected
+
+
+def test_float_style_is_the_default():
+    """Guards the single highest-impact setting in the repo: emitting bare
+    integers would be wrong on ~92% of otherwise-correct predictions."""
+    assert format_number("500") == "500.0"
+    assert PostprocessOptions().number_format == "float"
+
+
+def test_format_number_round_trips_real_label_shapes():
+    for label in ["500.0", "3.53", "0.709", "1.0", "48.0", "18.55"]:
+        assert format_number(label) == label
 
 
 # --- parsing ---------------------------------------------------------------
@@ -134,14 +154,16 @@ def test_parse_handles_missing_number():
 
 # --- full normalisation ----------------------------------------------------
 @pytest.mark.parametrize("raw,expected", [
-    ("34 gram", "34 gram"),
-    ("34 g", "34 gram"),
-    ("34 gms", "34 gram"),
-    ("34.0 gram", "34 gram"),
+    ("34 gram", "34.0 gram"),
+    ("34 g", "34.0 gram"),
+    ("34 gms", "34.0 gram"),
+    ("34.0 gram", "34.0 gram"),
     ("34.50 g", "34.5 gram"),
-    ("1,000 g", "1000 gram"),
-    ("The item weighs 34 grams", "34 gram"),
-    ("34GRAM", "34 gram"),
+    ("1,000 g", "1000.0 gram"),
+    ("The item weighs 34 grams", "34.0 gram"),
+    ("34GRAM", "34.0 gram"),
+    ("500.0 gram", "500.0 gram"),
+    ("3.53 oz", "3.53 ounce"),
 ])
 def test_normalize_prediction_produces_exact_match_format(raw, expected):
     assert normalize_prediction(raw, "item_weight")[0] == expected
@@ -159,15 +181,44 @@ def test_normalize_blanks_unparseable_output():
         assert normalize_prediction(junk, "item_weight")[0] == ""
 
 
-def test_range_rule_blank_is_the_default():
-    assert normalize_prediction("10 to 20 gram", "item_weight")[0] == ""
+def test_range_rule_bracket_is_the_default():
+    """train.csv has zero empty labels, so blanking is a guaranteed FN while
+    the bracket form can score a TP -- the labels use exactly that notation."""
+    assert PostprocessOptions().range_rule == "bracket"
+    assert normalize_prediction("10 to 20 gram", "item_weight")[0] == "[10.0, 20.0] gram"
+
+
+def test_range_rule_blank_still_available():
+    opts = PostprocessOptions(range_rule="blank")
+    assert normalize_prediction("10 to 20 gram", "item_weight", opts)[0] == ""
 
 
 def test_range_rule_max_and_min():
     max_opts = PostprocessOptions(range_rule="max")
     min_opts = PostprocessOptions(range_rule="min")
-    assert normalize_prediction("10 to 20 gram", "item_weight", max_opts)[0] == "20 gram"
-    assert normalize_prediction("10 to 20 gram", "item_weight", min_opts)[0] == "10 gram"
+    assert normalize_prediction("10 to 20 gram", "item_weight", max_opts)[0] == "20.0 gram"
+    assert normalize_prediction("10 to 20 gram", "item_weight", min_opts)[0] == "10.0 gram"
+
+
+@pytest.mark.parametrize("raw,entity,expected", [
+    # The dataset's own notation must round-trip exactly.
+    ("[100.0, 240.0] volt", "voltage", "[100.0, 240.0] volt"),
+    ("[0.0, 10.0] volt", "voltage", "[0.0, 10.0] volt"),
+    ("[8.0, 12.0] fluid ounce", "item_volume", "[8.0, 12.0] fluid ounce"),
+    # The "X unit to Y unit" form the labels also use.
+    ("10 kilogram to 15 kilogram", "item_weight", "[10.0, 15.0] kilogram"),
+    ("100 to 240 volt", "voltage", "[100.0, 240.0] volt"),
+])
+def test_bracket_ranges_round_trip(raw, entity, expected):
+    assert normalize_prediction(raw, entity)[0] == expected
+
+
+def test_bracket_range_orders_low_to_high():
+    assert normalize_prediction("[240.0, 100.0] volt", "voltage")[0] == "[100.0, 240.0] volt"
+
+
+def test_bracket_range_still_rejects_invalid_units():
+    assert normalize_prediction("[1.0, 2.0] volt", "item_weight")[0] == ""
 
 
 def test_disabling_postprocess_passes_raw_text_through():
@@ -177,17 +228,20 @@ def test_disabling_postprocess_passes_raw_text_through():
 
 def test_reject_invalid_units_is_individually_toggleable():
     opts = PostprocessOptions(reject_invalid_units=False)
-    assert normalize_prediction("34 volt", "item_weight", opts)[0] == "34 volt"
+    assert normalize_prediction("34 volt", "item_weight", opts)[0] == "34.0 volt"
 
 
 def test_ground_truth_labels_survive_normalisation_unchanged():
-    """Correctly formatted values must be fixed points, or we would corrupt
-    predictions that were already right."""
+    """Real labels, in the dataset's own float style, must be fixed points --
+    otherwise we would corrupt predictions that were already correct."""
     labels = [
-        ("34 gram", "item_weight"), ("12.5 centimetre", "width"),
-        ("2.56 ounce", "item_weight"), ("110 volt", "voltage"),
-        ("1.5 litre", "item_volume"), ("8 fluid ounce", "item_volume"),
-        ("3 cubic foot", "item_volume"), ("1000 watt", "wattage"),
+        ("500.0 gram", "item_weight"), ("12.5 centimetre", "width"),
+        ("2.56 ounce", "item_weight"), ("110.0 volt", "voltage"),
+        ("1.5 litre", "item_volume"), ("8.0 fluid ounce", "item_volume"),
+        ("3.0 cubic foot", "item_volume"), ("1000.0 watt", "wattage"),
+        ("1.0 cup", "item_volume"), ("0.709 gram", "item_weight"),
+        ("30.0 kilogram", "maximum_weight_recommendation"),
+        ("[100.0, 240.0] volt", "voltage"),
     ]
     for label, entity in labels:
         assert normalize_prediction(label, entity)[0] == label, label
@@ -200,9 +254,9 @@ def test_apply_postprocess_returns_counts_of_fired_rules():
 
     cleaned, counts = apply_postprocess(raws, entities)
 
-    assert cleaned == ["34 gram", "", "", "", "12 gram"]
+    assert cleaned == ["34.0 gram", "[10.0, 20.0] gram", "", "", "12.0 gram"]
     assert counts["total"] == 5
-    assert counts["non_empty_out"] == 2
+    assert counts["non_empty_out"] == 3
     assert counts["range_detected"] == 1
     assert counts["blanked_invalid_unit_for_entity"] == 1
 
@@ -215,4 +269,13 @@ def test_options_from_config_ignores_unknown_keys():
 
 
 def test_options_from_config_falls_back_on_bad_range_rule():
-    assert PostprocessOptions.from_config({"range_rule": "nonsense"}).range_rule == "blank"
+    assert PostprocessOptions.from_config({"range_rule": "nonsense"}).range_rule == "bracket"
+
+
+def test_options_from_config_falls_back_on_bad_number_format():
+    assert PostprocessOptions.from_config({"number_format": "nonsense"}).number_format == "float"
+
+
+def test_options_from_config_reads_both_string_settings():
+    opts = PostprocessOptions.from_config({"range_rule": "min", "number_format": "int"})
+    assert opts.range_rule == "min" and opts.number_format == "int"
