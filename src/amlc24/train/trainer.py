@@ -112,6 +112,14 @@ def build_training_args(cfg: Any, output_dir: str | Path) -> Any:
         disable_tqdm=False,
         label_names=["labels"],
     )
+    # On T4 x2 Trainer sets train_batch_size = per_device * n_gpu = 2. It skips
+    # DataParallel for 8-bit models but still doubles the batch, which OOMs.
+    # The model lives on one device, so n_gpu must be 1 regardless of what is
+    # visible.
+    if args.n_gpu > 1:
+        logger.warning("%d GPUs visible; forcing n_gpu=1 (model is on one device)",
+                       args.n_gpu)
+        args._n_gpu = 1
     logger.info(
         "TrainingArguments: epochs=%s bs=%d x accum=%d (effective %d), lr=%.2e %s, "
         "optim=%s, fp16=%s, grad_ckpt=%s",

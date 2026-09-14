@@ -173,6 +173,27 @@ def load_processor(
     return processor
 
 
+def prepare_quantized_for_training(model: Any, use_gradient_checkpointing: bool = True) -> Any:
+    """Freeze the base model and enable checkpointing, WITHOUT upcasting to fp32.
+
+    Replaces peft's ``prepare_model_for_kbit_training``, which casts every
+    non-int8 parameter to fp32. Here that means the fp16 vision tower, the
+    embeddings and ``lm_head`` (~2.2B params) double in size -- about 4 GB extra,
+    which OOM'd a 14.56 GiB T4. Those weights are frozen, so fp32 buys nothing;
+    fp16 autocast covers the forward pass.
+    """
+    for param in model.parameters():
+        param.requires_grad = False
+    if use_gradient_checkpointing:
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+        # With a frozen embedding layer, checkpointed segments would otherwise
+        # have no input that requires grad, and LoRA would receive no gradient.
+        model.enable_input_require_grads()
+    return model
+
+
 def count_parameters(model: Any) -> dict[str, int | float]:
     """Trainable vs total parameter counts."""
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -257,7 +278,7 @@ def load_model(
     Returns ``(model, processor)``.
     """
     from transformers import Qwen2VLForConditionalGeneration
-    from peft import get_peft_model, prepare_model_for_kbit_training
+    from peft import get_peft_model
 
     torch = _torch()
     model_cfg = cfg.get("model", {})
@@ -294,9 +315,7 @@ def load_model(
         return model, processor
 
     grad_ckpt = bool(cfg.get("train", {}).get("gradient_checkpointing", True))
-    model = prepare_model_for_kbit_training(
-        model, use_gradient_checkpointing=grad_ckpt
-    )
+    model = prepare_quantized_for_training(model, use_gradient_checkpointing=grad_ckpt)
 
     lora_cfg = cfg.get("lora", {})
     if bool(lora_cfg.get("freeze_vision_tower", True)):
@@ -311,10 +330,16 @@ def load_model(
     if bool(lora_cfg.get("freeze_vision_tower", True)):
         freeze_vision_tower(model)  # re-assert after PEFT wrapping
 
-    if grad_ckpt:
-        model.enable_input_require_grads()
+    # LoRA weights must be fp32: fp16 trainable params make the fp16 GradScaler
+    # raise "Attempting to unscale FP16 gradients". They are tiny (~20M params).
+    for param in model.parameters():
+        if param.requires_grad and param.dtype != torch.float32:
+            param.data = param.data.float()
 
     count_parameters(model)
+    if torch.cuda.is_available():
+        logger.info("VRAM after model load: %.2f GB allocated",
+                    torch.cuda.memory_allocated() / 1024 ** 3)
     return model, processor
 
 
@@ -334,5 +359,6 @@ def load_for_inference(cfg: Any, adapter_path: str | None = None) -> tuple[Any, 
 __all__ = [
     "load_model", "load_processor", "load_for_inference", "gpu_report",
     "build_quantization_config", "build_lora_config", "count_parameters",
-    "freeze_vision_tower", "pin_single_gpu", "DEFAULT_MODEL_ID", "PATCH_AREA",
+    "freeze_vision_tower", "pin_single_gpu", "prepare_quantized_for_training",
+    "DEFAULT_MODEL_ID", "PATCH_AREA",
 ]
