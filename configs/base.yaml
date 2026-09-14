@@ -62,6 +62,12 @@ train:
   # always uses all 5,000 rows.
   eval_loss_fraction: 0.1
 
+  # Wall-clock guard. Measured on a T4 at 8-bit: ~2.7 s per training sample.
+  # A 12 h session minus ~1.2 h generation (5k rows at ~1.2 rows/s) and
+  # ~0.5 h download/model load leaves ~10 h; 9 h keeps a margin. When reached,
+  # training evaluates, saves and stops, and the best checkpoint is scored.
+  max_train_hours: 9.0
+
   # Class-weighted loss. The EDA found a 31.5x imbalance across entity_name
   # (item_weight 38.95% vs maximum_weight_recommendation 1.24%), so unweighted
   # training spends ~72% of its gradient on weight-and-dimension rows.
@@ -101,7 +107,14 @@ postprocess:
   # => 92.01% are exactly str(float(x)). Six of eight entities are 100%
   # float-style. Emitting bare integers instead would be wrong on ~92% of
   # otherwise-correct predictions.
-  number_format: float         # float | int | strip
+  #
+  # BUT the smoke run showed a fine-tuned model already reproduces the
+  # per-entity convention (maximum_weight_recommendation is ~50% bare
+  # integers), and forcing float turned correct "50 pound" into "50.0 pound".
+  # `preserve` keeps the model's own plain-decimal form and only rewrites
+  # invalid forms (exponent, commas, "2.50"). Use `float` for zero-shot runs.
+  # Every run also scores all variants in postprocess_ablation.csv.
+  number_format: preserve      # preserve | float | int | strip
 
   # train.csv contains ZERO empty labels, so an empty prediction is always a
   # false negative, and F1 = 2TP/(2TP+FP+FN) charges FN and FP identically.

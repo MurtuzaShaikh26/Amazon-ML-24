@@ -69,6 +69,71 @@ def _make_callback() -> Any:
     return callback
 
 
+class TrainingTimeBudget:
+    """Wall-clock guard so a run always finishes inside the Kaggle session.
+
+    The smoke run measured ~2.7 s per training sample on a T4 at 8-bit, so a
+    mis-sized config can silently need 20+ hours and die at the 12 h limit with
+    nothing scored. Once ``max_hours`` elapses the trainer evaluates, saves and
+    stops; ``load_best_model_at_end`` restores the best checkpoint, and
+    generation and scoring still run.
+    """
+
+    def __init__(self, max_hours: float | None):
+        self.max_seconds = float(max_hours) * 3600 if max_hours else None
+        self.projection_logged = False
+
+    def should_stop(self, elapsed_seconds: float) -> bool:
+        return self.max_seconds is not None and elapsed_seconds >= self.max_seconds
+
+    @staticmethod
+    def project_total_seconds(elapsed_seconds: float, step: int, max_steps: int) -> float | None:
+        if step <= 0 or max_steps <= 0:
+            return None
+        return elapsed_seconds / step * max_steps
+
+
+def _make_time_budget_callback(max_hours: float | None, projection_step: int = 20) -> Any:
+    """``TrainerCallback`` that logs a runtime projection and enforces the budget."""
+    import time
+
+    from transformers import TrainerCallback
+
+    budget = TrainingTimeBudget(max_hours)
+
+    class _TimeBudgetCallback(TrainerCallback):
+        def on_train_begin(self, args, state, control, **kwargs):
+            self.start = time.time()
+
+        def on_step_end(self, args, state, control, **kwargs):
+            elapsed = time.time() - self.start
+            if not budget.projection_logged and state.global_step >= projection_step:
+                budget.projection_logged = True
+                total = budget.project_total_seconds(elapsed, state.global_step, state.max_steps)
+                if total is not None:
+                    logger.info(
+                        "Throughput: %.1f s/step; projected training time %.2f h for %d steps",
+                        elapsed / state.global_step, total / 3600, state.max_steps,
+                    )
+                    if budget.max_seconds and total > budget.max_seconds:
+                        logger.warning(
+                            "Projected %.2f h exceeds the %.2f h budget; training will stop "
+                            "at the budget and keep the best checkpoint.",
+                            total / 3600, budget.max_seconds / 3600,
+                        )
+            if budget.should_stop(elapsed):
+                logger.warning(
+                    "Time budget of %.2f h reached at step %d/%d; evaluating, saving, stopping.",
+                    budget.max_seconds / 3600, state.global_step, state.max_steps,
+                )
+                control.should_evaluate = True
+                control.should_save = True
+                control.should_training_stop = True
+            return control
+
+    return _TimeBudgetCallback()
+
+
 def build_training_args(cfg: Any, output_dir: str | Path) -> Any:
     """``TrainingArguments`` from the ``train:`` config block.
 
@@ -231,7 +296,10 @@ def build_trainer(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator,
-        callbacks=[callback],
+        callbacks=[
+            callback,
+            _make_time_budget_callback(cfg.get("train", {}).get("max_train_hours")),
+        ],
     )
     return trainer, callback
 

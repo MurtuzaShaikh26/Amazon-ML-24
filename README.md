@@ -210,7 +210,7 @@ incidental:
 | `gradient_checkpointing` | `true` | Trades compute for activation memory. |
 | `optim` | `paged_adamw_8bit` | Paged states survive fragmentation spikes. |
 | LoRA | `r=16, α=32, dropout=0.05` on `q_proj,k_proj,v_proj,o_proj` | **Language model only** — the vision tower is frozen. |
-| schedule | 3 epochs, cosine, `warmup_ratio=0.03`, `lr=2e-4` | |
+| schedule | 1 epoch (measured: 3 would need ~22 h on a T4), cosine, `warmup_ratio=0.03`, `lr=2e-4`, 9 h wall-clock guard | |
 | `train.class_weights` | `sqrt_inverse` | 31.5x entity imbalance (see below). |
 
 ### Class-weighted loss

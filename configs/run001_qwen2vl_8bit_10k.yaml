@@ -2,7 +2,8 @@ extends: base.yaml
 run_id: run001_qwen2vl_8bit_10k
 description: >
   First fine-tune. Qwen2-VL-7B-Instruct, 8-bit QLoRA, 10k stratified training
-  samples, 3 epochs, evaluated on the frozen 5k eval split.
+  samples, 1 epoch (3 would need ~22 h on a T4), class-weighted loss,
+  evaluated on the frozen 5k eval split.
 
 seed: 42
 
@@ -30,7 +31,12 @@ lora:
   freeze_vision_tower: true
 
 train:
-  num_train_epochs: 3
+  # Measured in the smoke run: ~2.7 s per training sample on a T4 at 8-bit
+  # (3 epochs x 64 rows in 8.9 min). 10k x 3 epochs would need ~22 h, far past
+  # the 12 h session. 1 epoch over 10k samples is ~7.5 h, plus ~1.2 h to
+  # generate over the eval 5k. max_train_hours stops early if that is wrong.
+  num_train_epochs: 1
+  max_train_hours: 9.0
   per_device_train_batch_size: 1
   gradient_accumulation_steps: 8
   learning_rate: 2.0e-4
@@ -58,5 +64,5 @@ postprocess:
   normalize_units: true
   reject_invalid_units: true
   # Both values below are driven by the EDA, not by assumption -- see base.yaml.
-  number_format: float
+  number_format: preserve
   range_rule: bracket

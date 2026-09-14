@@ -158,10 +158,13 @@ def score(
         by_group = f1_by_group(y_true, post_preds, predictions["group_id"].tolist())
         tracker.save_table(by_group, "f1_by_group")
 
+    ablation = postprocess_ablation(y_true, raw_preds, entities, opts)
+
     tracker.save_predictions(predictions)
     tracker.save_table(by_entity, "f1_by_entity")
     tracker.save_table(by_unit, "f1_by_unit")
     tracker.save_table(errors, "error_analysis")
+    tracker.save_table(ablation, "postprocess_ablation")
 
     return {
         "raw": raw_scores,
@@ -174,8 +177,80 @@ def score(
         "by_unit": by_unit,
         "by_group": by_group,
         "errors": errors,
+        "ablation": ablation,
         "predictions": predictions,
     }
+
+
+def postprocess_ablation(
+    y_true: list[str],
+    raw_preds: list[str],
+    entities: list[str],
+    config_opts: PostprocessOptions | None = None,
+) -> pd.DataFrame:
+    """Score every ``number_format`` x ``range_rule`` variant on the same outputs.
+
+    Pure string work -- seconds of CPU, no GPU -- so every run reports which
+    post-processing setting would have scored best instead of taking one config
+    choice on faith. The smoke run is why this exists: forcing float-style
+    numbers *lowered* F1, because the fine-tuned model had already learned the
+    per-entity number convention.
+
+    Choosing the best variant on the eval set is a mild form of selection on
+    that set; with 16 discrete variants on 5,000 rows the optimism is small, but
+    confirm a switch on the next run rather than reporting the maximum as-is.
+    """
+    import logging as _logging
+    from dataclasses import replace
+
+    from ..postprocess.normalize import NUMBER_FORMATS, RANGE_RULES
+
+    base = config_opts or PostprocessOptions()
+
+    def summary(scores: dict, preds: list[str]) -> dict:
+        return {
+            "f1": scores["f1"], "precision": scores["precision"], "recall": scores["recall"],
+            "tp": scores["tp"], "fp": scores["fp"], "fn": scores["fn"],
+            "macro_f1": macro_f1(f1_by_entity(y_true, preds, entities)),
+        }
+
+    # The metric and post-processing functions log at INFO on every call;
+    # 17 variants would bury the run log.
+    noisy = [_logging.getLogger("amlc24.metrics.f1"),
+             _logging.getLogger("amlc24.postprocess.normalize")]
+    previous = [lg.level for lg in noisy]
+    for lg in noisy:
+        lg.setLevel(_logging.WARNING)
+    try:
+        rows = [{"variant": "raw (no post-processing)", "number_format": "-",
+                 "range_rule": "-", **summary(f1_score(y_true, raw_preds), raw_preds)}]
+        for fmt in NUMBER_FORMATS:
+            for rule in RANGE_RULES:
+                opts = replace(base, number_format=fmt, range_rule=rule)
+                preds, _ = apply_postprocess(raw_preds, entities, opts)
+                rows.append({"variant": f"{fmt} / {rule}", "number_format": fmt,
+                             "range_rule": rule, **summary(f1_score(y_true, preds), preds)})
+    finally:
+        for lg, level in zip(noisy, previous):
+            lg.setLevel(level)
+
+    table = pd.DataFrame(rows)
+    table["is_config"] = (table["number_format"] == base.number_format) & (
+        table["range_rule"] == base.range_rule
+    )
+    table = table.sort_values("f1", ascending=False, ignore_index=True)
+
+    best = table.iloc[0]
+    chosen = table[table["is_config"]].iloc[0]
+    logger.info("Post-processing ablation:\n%s",
+                table.to_string(index=False, float_format=_fmt4))
+    logger.info(
+        "Best variant: %s (F1 %.4f). Configured: %s (F1 %.4f).%s",
+        best["variant"], best["f1"], chosen["variant"], chosen["f1"],
+        "" if best["variant"] == chosen["variant"]
+        else " Consider switching the config -- and confirm on the next run.",
+    )
+    return table
 
 
 def run_finetune(
@@ -201,7 +276,11 @@ def run_finetune(
     ensure_dirs()
 
     cfg = load_config(config_path)
-    tracker = RunTracker(cfg)
+    # A smoke run must never share a directory or leaderboard row with the real
+    # run: its checkpoints would sit beside the real ones and its row would be
+    # overwritten (or worse, survive) under the real run_id.
+    truncated = bool(max_train_rows or max_eval_rows)
+    tracker = RunTracker(cfg, run_id=f"{cfg.run_id}_smoke" if truncated else None)
     log_handler = add_file_handler(tracker.dir / "log.txt")
 
     try:

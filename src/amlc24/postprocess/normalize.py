@@ -94,7 +94,9 @@ class PostprocessOptions:
     reject_invalid_units: bool = True
     range_rule: str = "bracket"
     infer_missing_unit: bool = True
-    number_format: str = "float"
+    # `preserve`, not `float`: the smoke run showed a fine-tuned model already
+    # reproduces the per-entity number convention, and forcing float broke it.
+    number_format: str = "preserve"
 
     @classmethod
     def from_config(cls, cfg: Mapping | None) -> "PostprocessOptions":
@@ -108,10 +110,10 @@ class PostprocessOptions:
             logger.warning("Unknown range_rule %r; falling back to 'bracket'", rule)
             rule = "bracket"
 
-        style = str(raw.get("number_format", "float")).lower()
+        style = str(raw.get("number_format", "preserve")).lower()
         if style not in NUMBER_FORMATS:
-            logger.warning("Unknown number_format %r; falling back to 'float'", style)
-            style = "float"
+            logger.warning("Unknown number_format %r; falling back to 'preserve'", style)
+            style = "preserve"
 
         strings = {"range_rule", "number_format"}
         known = {f for f in cls.__dataclass_fields__ if f not in strings}
@@ -143,7 +145,7 @@ def _to_decimal(text: str) -> Decimal | None:
         return None
 
 
-NUMBER_FORMATS = ("float", "int", "strip")
+NUMBER_FORMATS = ("preserve", "float", "int", "strip")
 
 
 def _plain_decimal(text: str) -> str:
@@ -195,6 +197,20 @@ def format_number(value: Decimal | float | int | str, style: str = "float") -> s
     dec = value if isinstance(value, Decimal) else _to_decimal(str(value))
     if dec is None:
         return ""
+
+    if style == "preserve":
+        # Decimal keeps the written form ("500" vs "500.0"), so a fine-tuned
+        # model's per-entity convention survives -- maximum_weight_recommendation
+        # labels are ~50% bare integers, and forcing float broke them. Only
+        # forms no label uses are rewritten: exponent -> plain float style, and
+        # redundant trailing zeros "2.50" -> "2.5" (0% of labels have those).
+        text = str(dec)
+        if "e" in text.lower():
+            return format_number(dec, "float")
+        if "." in text:
+            head, tail = text.split(".", 1)
+            return f"{head or '0'}.{tail.rstrip('0') or '0'}"
+        return text
 
     if style == "float":
         try:

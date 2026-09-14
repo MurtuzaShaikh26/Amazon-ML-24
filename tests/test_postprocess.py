@@ -19,6 +19,11 @@ from amlc24.postprocess.units import (
     is_valid_unit,
 )
 
+# Tests of float-style output request it explicitly: the pipeline default is now
+# `preserve`, because a fine-tuned model already writes the per-entity number
+# convention (see NOTES.md, smoke run).
+FLOAT = PostprocessOptions(number_format="float")
+
 
 # --- allowed units ---------------------------------------------------------
 def test_entity_unit_map_covers_the_eight_competition_entities():
@@ -117,7 +122,7 @@ def test_float_style_is_the_default():
     """Guards the single highest-impact setting in the repo: emitting bare
     integers would be wrong on ~92% of otherwise-correct predictions."""
     assert format_number("500") == "500.0"
-    assert PostprocessOptions().number_format == "float"
+    assert format_number("500", "float") == "500.0"  # pipeline default is preserve
 
 
 def test_format_number_round_trips_real_label_shapes():
@@ -154,7 +159,7 @@ def test_exponent_input_converts_to_plain_decimal(raw, expected):
     ("1.5E-2 litre", "item_volume", "0.015 litre"),
 ])
 def test_exponent_predictions_are_rescued_not_blanked(raw, entity, expected):
-    assert normalize_prediction(raw, entity)[0] == expected
+    assert normalize_prediction(raw, entity, FLOAT)[0] == expected
 
 
 def test_exponent_minus_is_not_mistaken_for_a_range():
@@ -166,8 +171,8 @@ def test_exponent_minus_is_not_mistaken_for_a_range():
 
 
 def test_real_ranges_still_parse_after_the_exponent_guard():
-    assert normalize_prediction("10-20 gram", "item_weight")[0] == "[10.0, 20.0] gram"
-    assert normalize_prediction("10 to 20 gram", "item_weight")[0] == "[10.0, 20.0] gram"
+    assert normalize_prediction("10-20 gram", "item_weight", FLOAT)[0] == "[10.0, 20.0] gram"
+    assert normalize_prediction("10 to 20 gram", "item_weight", FLOAT)[0] == "[10.0, 20.0] gram"
 
 
 # --- parsing ---------------------------------------------------------------
@@ -211,7 +216,7 @@ def test_parse_handles_missing_number():
     ("3.53 oz", "3.53 ounce"),
 ])
 def test_normalize_prediction_produces_exact_match_format(raw, expected):
-    assert normalize_prediction(raw, "item_weight")[0] == expected
+    assert normalize_prediction(raw, "item_weight", FLOAT)[0] == expected
 
 
 def test_normalize_blanks_units_invalid_for_the_entity():
@@ -230,7 +235,7 @@ def test_range_rule_bracket_is_the_default():
     """train.csv has zero empty labels, so blanking is a guaranteed FN while
     the bracket form can score a TP -- the labels use exactly that notation."""
     assert PostprocessOptions().range_rule == "bracket"
-    assert normalize_prediction("10 to 20 gram", "item_weight")[0] == "[10.0, 20.0] gram"
+    assert normalize_prediction("10 to 20 gram", "item_weight", FLOAT)[0] == "[10.0, 20.0] gram"
 
 
 def test_range_rule_blank_still_available():
@@ -239,8 +244,8 @@ def test_range_rule_blank_still_available():
 
 
 def test_range_rule_max_and_min():
-    max_opts = PostprocessOptions(range_rule="max")
-    min_opts = PostprocessOptions(range_rule="min")
+    max_opts = PostprocessOptions(range_rule="max", number_format="float")
+    min_opts = PostprocessOptions(range_rule="min", number_format="float")
     assert normalize_prediction("10 to 20 gram", "item_weight", max_opts)[0] == "20.0 gram"
     assert normalize_prediction("10 to 20 gram", "item_weight", min_opts)[0] == "10.0 gram"
 
@@ -255,7 +260,7 @@ def test_range_rule_max_and_min():
     ("100 to 240 volt", "voltage", "[100.0, 240.0] volt"),
 ])
 def test_bracket_ranges_round_trip(raw, entity, expected):
-    assert normalize_prediction(raw, entity)[0] == expected
+    assert normalize_prediction(raw, entity, FLOAT)[0] == expected
 
 
 def test_bracket_range_orders_low_to_high():
@@ -272,7 +277,7 @@ def test_disabling_postprocess_passes_raw_text_through():
 
 
 def test_reject_invalid_units_is_individually_toggleable():
-    opts = PostprocessOptions(reject_invalid_units=False)
+    opts = PostprocessOptions(reject_invalid_units=False, number_format="float")
     assert normalize_prediction("34 volt", "item_weight", opts)[0] == "34.0 volt"
 
 
@@ -297,7 +302,7 @@ def test_apply_postprocess_returns_counts_of_fired_rules():
     raws = ["34 g", "10 to 20 gram", "34 volt", "", "12 gram"]
     entities = ["item_weight"] * 5
 
-    cleaned, counts = apply_postprocess(raws, entities)
+    cleaned, counts = apply_postprocess(raws, entities, FLOAT)
 
     assert cleaned == ["34.0 gram", "[10.0, 20.0] gram", "", "", "12.0 gram"]
     assert counts["total"] == 5
@@ -318,7 +323,7 @@ def test_options_from_config_falls_back_on_bad_range_rule():
 
 
 def test_options_from_config_falls_back_on_bad_number_format():
-    assert PostprocessOptions.from_config({"number_format": "nonsense"}).number_format == "float"
+    assert PostprocessOptions.from_config({"number_format": "nonsense"}).number_format == "preserve"
 
 
 def test_options_from_config_reads_both_string_settings():

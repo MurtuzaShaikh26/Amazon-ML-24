@@ -304,6 +304,42 @@ the ablation is a config flip: set `train.class_weights.enabled: false`.
 
 ---
 
+## Smoke run (2026-09-14) — 64 train / 63 eval rows on a Kaggle T4
+
+The plumbing worked end to end. The scores are meaningless at this size, but the
+run measured two things that changed the plan.
+
+**Memory.** Peak VRAM 11.26 GB on a 14.56 GiB card, after fixing the earlier
+OOM (fp32 upcast of frozen weights + both T4s visible). About 3 GB headroom.
+
+**Speed — the original plan could not fit.** 3 epochs over 64 rows (192
+samples, 24 optimiser steps) took 8.9 min: **~2.7 s per training sample**. The
+planned 10k x 3 epochs would need ~22 h against a 12 h session. The earlier
+5.5–7.5 h estimate assumed a much faster step; LLM.int8 matmuls are slow on
+Turing. run001 is now **1 epoch** (~7.5 h), and `max_train_hours: 9` evaluates,
+saves and stops if the estimate is still wrong, so a run always gets scored. A
+throughput projection is logged at step 20.
+
+Generation ran at ~1.2 rows/s: ~70 min for the eval 5k, but **~30 h for the
+131k-row test set**. Submission generation needs its own plan (larger inference
+batch, both GPUs as two processes, or several sessions) before it is attempted.
+
+**Post-processing regressed F1: raw 0.6154 -> post 0.5843.** Almost entirely
+`maximum_weight_recommendation` (raw 0.909 -> post 0.286). ~50% of those labels
+are bare integers, the fine-tuned model had already learned to write `50
+pound`, and `number_format: float` rewrote it to `50.0 pound`. The EDA-derived
+rule was right for a model that does not know the convention and wrong for one
+that does. New default `number_format: preserve` keeps the model's own plain
+decimal and only rewrites invalid forms (exponent, `2.50`). Every run now also
+writes `postprocess_ablation.csv` scoring all 16 `number_format` x `range_rule`
+variants on the same outputs — seconds of CPU — so the choice is measured each
+time rather than assumed.
+
+The smoke run also wrote into `run001_qwen2vl_8bit_10k/` and its leaderboard
+row. Truncated runs now use `<run_id>_smoke`.
+
+---
+
 ## Run 001 — `run001_qwen2vl_8bit_10k`
 
 **Status:** not yet run.

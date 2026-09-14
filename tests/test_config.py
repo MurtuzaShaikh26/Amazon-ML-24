@@ -111,7 +111,9 @@ def test_run001_inherits_from_base():
     assert cfg.run_id == "run001_qwen2vl_8bit_10k"
     # Overridden in the child:
     assert cfg.quantization.bits == 8
-    assert cfg.train.num_train_epochs == 3
+    # 1, not 3: the smoke run measured ~2.7 s/sample, so 3 epochs needs ~22 h.
+    assert cfg.train.num_train_epochs == 1
+    assert cfg.train.max_train_hours == 9.0
     # Inherited from base.yaml only:
     assert cfg.train.max_length == 1024
     assert cfg.inference.batch_size == 4
