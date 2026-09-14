@@ -19,6 +19,8 @@ Constraints this module encodes, all of them Turing-specific:
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,41 @@ PATCH_AREA = 28 * 28  # one visual token per 28x28 patch
 def _torch():
     import torch
     return torch
+
+
+def pin_single_gpu(device: int = 0) -> bool:
+    """Restrict the session to one GPU. Call **before** torch initialises CUDA.
+
+    Kaggle's default accelerator is **T4 x2**, so ``torch.cuda.device_count()``
+    is 2. HF ``Trainer`` reacts to that by wrapping the model in
+    ``nn.DataParallel``, which replicates it across both devices every step.
+    That is wrong here for two reasons:
+
+    * the model is loaded with ``device_map={"": 0}``, i.e. already pinned to
+      GPU 0, and DataParallel replication of an 8-bit bitsandbytes model either
+      raises or silently degrades;
+    * a 7B model at 8-bit with ``max_pixels=256*28*28`` fits in one 16 GB T4, so
+      there is nothing to gain from splitting it.
+
+    Returns True if the variable was set, False if CUDA was already initialised
+    (in which case the caller must restart the kernel for it to take effect).
+    """
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        logger.info("CUDA_VISIBLE_DEVICES already set to %r; leaving it alone",
+                    os.environ["CUDA_VISIBLE_DEVICES"])
+        return False
+
+    if "torch" in sys.modules and sys.modules["torch"].cuda.is_initialized():
+        logger.warning(
+            "CUDA is already initialised, so pinning to one GPU has no effect. "
+            "Restart the kernel and call pin_single_gpu() before importing torch "
+            "if Trainer reports n_gpu > 1."
+        )
+        return False
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(device)
+    logger.info("Pinned session to GPU %d (avoids Trainer's DataParallel path)", device)
+    return True
 
 
 def gpu_report() -> dict[str, Any]:
@@ -62,6 +99,13 @@ def gpu_report() -> dict[str, Any]:
             "P100 detected. It is slower than T4 for fp16 (no tensor cores for "
             "this workload) and the run may exceed the 12-hour session limit. "
             "Prefer a T4 x2 accelerator."
+        )
+    if report["device_count"] > 1:
+        logger.warning(
+            "%d GPUs visible. HF Trainer will wrap the model in DataParallel, "
+            "which breaks an 8-bit model already pinned to GPU 0. Call "
+            "pin_single_gpu() before importing torch (and restart the kernel).",
+            report["device_count"],
         )
     return report
 
@@ -290,5 +334,5 @@ def load_for_inference(cfg: Any, adapter_path: str | None = None) -> tuple[Any, 
 __all__ = [
     "load_model", "load_processor", "load_for_inference", "gpu_report",
     "build_quantization_config", "build_lora_config", "count_parameters",
-    "freeze_vision_tower", "DEFAULT_MODEL_ID", "PATCH_AREA",
+    "freeze_vision_tower", "pin_single_gpu", "DEFAULT_MODEL_ID", "PATCH_AREA",
 ]

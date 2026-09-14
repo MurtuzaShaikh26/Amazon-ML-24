@@ -46,8 +46,16 @@ def prepare_data(
     cfg: Config,
     download: bool = True,
     image_dir: Path | None = None,
+    max_train_rows: int | None = None,
+    max_eval_rows: int | None = None,
 ) -> dict[str, Any]:
-    """Load train.csv, resolve the frozen split, and fetch the needed images."""
+    """Load train.csv, resolve the frozen split, and fetch the needed images.
+
+    ``max_train_rows`` / ``max_eval_rows`` truncate the resolved split **before**
+    the image download, which is what makes a smoke test cheap: they cap the
+    work without touching the frozen split file. They are for plumbing checks
+    only -- a truncated eval set is not a comparable score.
+    """
     data_cfg = cfg.get("data", {})
     train_all = load_train()
 
@@ -62,6 +70,17 @@ def prepare_data(
 
     eval_df, train_df = load_split_frames(split, train_all)
     logger.info("Split resolved: %d train rows, %d eval rows", len(train_df), len(eval_df))
+
+    if max_train_rows or max_eval_rows:
+        if max_train_rows:
+            train_df = train_df.head(int(max_train_rows)).reset_index(drop=True)
+        if max_eval_rows:
+            eval_df = eval_df.head(int(max_eval_rows)).reset_index(drop=True)
+        logger.warning(
+            "TRUNCATED to %d train / %d eval rows. This is a plumbing check, "
+            "NOT a comparable result -- the eval set is no longer the frozen 5k.",
+            len(train_df), len(eval_df),
+        )
 
     target_images = Path(image_dir) if image_dir else IMAGE_DIR
     report = None
@@ -164,12 +183,19 @@ def run_finetune(
     download_images: bool = True,
     image_dir: str | Path | None = None,
     max_eval_rows: int | None = None,
+    max_train_rows: int | None = None,
     skip_training: bool = False,
 ) -> dict[str, Any]:
     """Train, generate, score, and record a complete run.
 
     ``skip_training=True`` evaluates the base model without fine-tuning, which
     is the zero-shot baseline the fine-tune has to beat.
+
+    ``max_train_rows`` / ``max_eval_rows`` cap the work for a smoke test. They
+    truncate the resolved split before images are downloaded, so a plumbing
+    check costs minutes rather than hours. Any run using them is marked as
+    truncated in ``metrics.json`` and on the leaderboard, because its score is
+    not comparable to a full run.
     """
     setup_logging()
     ensure_dirs()
@@ -192,6 +218,8 @@ def run_finetune(
             cfg,
             download=download_images,
             image_dir=Path(image_dir) if image_dir else None,
+            max_train_rows=max_train_rows,
+            max_eval_rows=max_eval_rows,
         )
         train_df, eval_df = data["train_df"], data["eval_df"]
 
@@ -224,8 +252,7 @@ def run_finetune(
 
         model.config.use_cache = True
         predictions = generate_predictions(
-            model, processor, eval_df, cfg,
-            image_dir=data["image_dir"], max_rows=max_eval_rows,
+            model, processor, eval_df, cfg, image_dir=data["image_dir"],
         )
 
         results = score(predictions, cfg, tracker)
@@ -237,6 +264,7 @@ def run_finetune(
             "n_train": len(train_df),
             "n_eval": len(predictions),
             "skip_training": skip_training,
+            "truncated": bool(max_train_rows or max_eval_rows),
             "raw": results["raw"],
             "post": results["post"],
             "macro_f1_raw": results["macro_f1_raw"],
@@ -254,9 +282,14 @@ def run_finetune(
         }
         tracker.save_metrics(metrics)
         tracker.save_env()
+        note_parts = []
+        if skip_training:
+            note_parts.append("zero-shot baseline")
+        if max_train_rows or max_eval_rows:
+            note_parts.append("TRUNCATED smoke run -- not comparable")
         tracker.append_leaderboard(
             metrics, train_seconds=train_stats.get("train_seconds"),
-            notes="zero-shot baseline" if skip_training else "",
+            notes="; ".join(note_parts),
         )
 
         logger.info("=" * 72)
@@ -283,4 +316,74 @@ def run_finetune(
         remove_handler(log_handler)
 
 
-__all__ = ["run_finetune", "prepare_data", "score"]
+def run_test_predictions(
+    config_path: str | Path,
+    adapter_path: str | Path | None = None,
+    download_images: bool = True,
+    image_dir: str | Path | None = None,
+    max_rows: int | None = None,
+) -> dict[str, Any]:
+    """Predict over the blind ``test.csv`` and write a valid submission.
+
+    Loads the base model plus the trained LoRA adapter (defaulting to the run's
+    ``adapter_best``), downloads the test images, generates, post-processes, and
+    writes ``submission.csv`` through the validating writer.
+
+    Kept separate from ``run_finetune`` because it is a distinct, expensive
+    operation (~131k rows) that you only want at submission time, not on every
+    experiment.
+    """
+    setup_logging()
+    ensure_dirs()
+
+    cfg = load_config(config_path)
+    tracker = RunTracker(cfg)
+
+    from ..data.load import load_test
+    from ..inference.generate import generate_predictions
+    from ..models.qwen2vl import load_for_inference
+    from ..results.submission import write_submission
+
+    if adapter_path is None:
+        candidate = tracker.checkpoints_dir / "adapter_best"
+        adapter_path = candidate if candidate.exists() else None
+        if adapter_path is None:
+            logger.warning(
+                "No adapter found at %s; predicting with the BASE model (zero-shot).",
+                candidate,
+            )
+
+    test_df = load_test()
+    if max_rows:
+        test_df = test_df.head(int(max_rows)).reset_index(drop=True)
+    logger.info("Predicting over %d test rows", len(test_df))
+
+    target_images = Path(image_dir) if image_dir else IMAGE_DIR
+    if download_images:
+        download_for_frames(
+            [test_df], image_dir=target_images,
+            threads=int(cfg.get("data", {}).get("download_threads", 32)),
+        )
+
+    model, processor = load_for_inference(cfg, str(adapter_path) if adapter_path else None)
+    raw = generate_predictions(model, processor, test_df, cfg, image_dir=target_images)
+
+    opts = PostprocessOptions.from_config(cfg.get("postprocess", {}))
+    cleaned, rule_counts = apply_postprocess(
+        raw["y_pred_raw"].tolist(), raw["entity_name"].tolist(), opts
+    )
+    submission = pd.DataFrame({"index": raw["index"], "prediction": cleaned})
+
+    path = write_submission(
+        submission, tracker.dir / "submission.csv", test_df=test_df
+    )
+    return {
+        "submission": submission,
+        "path": path,
+        "raw": raw,
+        "postprocess_rules": dict(rule_counts),
+        "tracker": tracker,
+    }
+
+
+__all__ = ["run_finetune", "run_test_predictions", "prepare_data", "score"]
