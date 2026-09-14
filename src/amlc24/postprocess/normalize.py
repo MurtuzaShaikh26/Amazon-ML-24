@@ -45,8 +45,13 @@ logger = logging.getLogger(__name__)
 RANGE_RULES = ("bracket", "blank", "max", "min")
 
 # A number: optional sign, digits with optional thousands separators, optional
-# decimal part; also matches a bare ".5".
-_NUMBER = r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+|\d*\.\d+)(?:\.\d+)?"
+# decimal part; also matches a bare ".5" and an exponent suffix.
+#
+# Exponent input is accepted on purpose. The competition rejects "2.2e2
+# kilogram" as an *output*, but a model may well emit it -- and converting that
+# to the valid "220.0 kilogram" is strictly better than blanking, which is a
+# guaranteed false negative. Output is always rendered in plain form.
+_NUMBER = r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d+|\d*\.\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?"
 _UNIT = r"[A-Za-zµμ][A-Za-zµμ\.\s/]*"
 
 _VALUE_RE = re.compile(rf"(?P<number>{_NUMBER})\s*(?P<unit>{_UNIT})?", re.UNICODE)
@@ -60,8 +65,12 @@ _BRACKET_RANGE_RE = re.compile(
 
 # "10 to 20 gram", "10-20 gram", "10 ~ 20 gram", "between 10 and 20 gram", and
 # the dataset's "10 kilogram to 15 kilogram" (unit repeated after each number).
+#
+# The (?![eE][-+]?\d) guard after `lo` stops the regex backtracking into an
+# exponent: without it "1.5E-2 litre" matches as lo=1.5, lounit=E, separator=-,
+# hi=2, silently inventing the range [1.5, 2.0].
 _RANGE_RE = re.compile(
-    rf"(?P<lo>{_NUMBER})\s*(?P<lounit>{_UNIT})?\s*(?:to|-|–|—|~|and)\s*"
+    rf"(?P<lo>{_NUMBER})(?![eE][-+]?\d)\s*(?P<lounit>{_UNIT})?\s*(?:to|-|–|—|~|and)\s*"
     rf"(?P<hi>{_NUMBER})\s*(?P<unit>{_UNIT})?",
     re.IGNORECASE | re.UNICODE,
 )
@@ -137,6 +146,23 @@ def _to_decimal(text: str) -> Decimal | None:
 NUMBER_FORMATS = ("float", "int", "strip")
 
 
+def _plain_decimal(text: str) -> str:
+    """Render an exponent-notation number in plain positional form.
+
+    ``"2.2e2 kilogram"`` is explicitly invalid per the competition spec, so
+    every code path that could emit ``e``/``E`` routes through here. Keeps at
+    least one decimal place to stay consistent with the labels' float style.
+    """
+    try:
+        plain = format(Decimal(text), "f")
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return ""
+    if "." not in plain:
+        return f"{plain}.0"
+    trimmed = plain.rstrip("0")
+    return f"{trimmed}0" if trimmed.endswith(".") else trimmed
+
+
 def format_number(value: Decimal | float | int | str, style: str = "float") -> str:
     """Render a number the way the ground-truth labels are actually written.
 
@@ -172,11 +198,13 @@ def format_number(value: Decimal | float | int | str, style: str = "float") -> s
 
     if style == "float":
         try:
-            # str(float(...)) is exactly the labels' convention, including its
-            # exponent form for the handful of extreme values that use it.
-            return str(float(dec))
+            text = str(float(dec))
         except (ValueError, OverflowError, ArithmeticError):
             return ""
+        # The competition spec lists "2.2e2 kilogram" as INVALID, so exponent
+        # notation must never reach the output even though str(float(x))
+        # produces it for very large or very small magnitudes.
+        return _plain_decimal(text) if ("e" in text or "E" in text) else text
 
     if style == "strip":
         normalised = dec.normalize()

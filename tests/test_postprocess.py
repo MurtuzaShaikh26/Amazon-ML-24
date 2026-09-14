@@ -125,6 +125,51 @@ def test_format_number_round_trips_real_label_shapes():
         assert format_number(label) == label
 
 
+# --- exponent notation is invalid output ------------------------------------
+@pytest.mark.parametrize("raw", [
+    "1e20", "1e16", "0.0000001", "1000000000000000000000", "2.2e2", "1e-7",
+])
+def test_output_never_uses_exponent_notation(raw):
+    """The spec lists "2.2e2 kilogram" as invalid, but str(float(x)) produces
+    exponent form for extreme magnitudes."""
+    out = format_number(raw)
+    assert "e" not in out.lower(), f"{raw!r} -> {out!r} leaked exponent notation"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("1e20", "100000000000000000000.0"),
+    ("2.2e2", "220.0"),
+    ("1e-3", "0.001"),
+    ("1.5E-2", "0.015"),
+])
+def test_exponent_input_converts_to_plain_decimal(raw, expected):
+    assert format_number(raw) == expected
+
+
+@pytest.mark.parametrize("raw,entity,expected", [
+    # Converting invalid exponent output into a valid plain value beats
+    # blanking, which would be a guaranteed false negative.
+    ("2.2e2 kilogram", "item_weight", "220.0 kilogram"),
+    ("1e3 gram", "item_weight", "1000.0 gram"),
+    ("1.5E-2 litre", "item_volume", "0.015 litre"),
+])
+def test_exponent_predictions_are_rescued_not_blanked(raw, entity, expected):
+    assert normalize_prediction(raw, entity)[0] == expected
+
+
+def test_exponent_minus_is_not_mistaken_for_a_range():
+    """Regression: the range regex backtracked into "1.5E-2" and read the
+    exponent's minus as a separator, inventing the range [1.5, 2.0]."""
+    result = normalize_prediction("1.5E-2 litre", "item_volume")[0]
+    assert result == "0.015 litre"
+    assert "[" not in result
+
+
+def test_real_ranges_still_parse_after_the_exponent_guard():
+    assert normalize_prediction("10-20 gram", "item_weight")[0] == "[10.0, 20.0] gram"
+    assert normalize_prediction("10 to 20 gram", "item_weight")[0] == "[10.0, 20.0] gram"
+
+
 # --- parsing ---------------------------------------------------------------
 def test_parse_simple_value():
     parsed = parse_value("34 gram", "item_weight")

@@ -46,33 +46,72 @@ def _looks_like_data_dir(p: Path) -> bool:
     return (p / "train.csv").exists()
 
 
-def _find_kaggle_data_dir() -> Path:
-    """Glob ``/kaggle/input/*/`` for the dataset holding the competition CSVs.
+# How deep below /kaggle/input to look for train.csv. The official archive
+# unpacks as "<slug>/student_resource 3/dataset/train.csv", which is depth 3.
+# 5 leaves room for an extra wrapper folder without walking image directories.
+MAX_DATA_SEARCH_DEPTH = 5
 
-    The competition archive is sometimes uploaded with a nested ``dataset/``
-    folder, so we check one level down as well. Falls back to the first mounted
-    input dataset with a warning so a misnamed upload degrades to a clear error
-    later rather than an opaque one here.
+# Directories that never contain the CSVs but can hold tens of thousands of
+# files. Skipping them keeps the search fast on a mounted image dataset.
+_SKIP_DIRS = {
+    "images", "image", "img", "__pycache__", ".git", ".ipynb_checkpoints",
+    "node_modules", "train_images", "test_images",
+}
+
+
+def _search_for_data_dir(root: Path, max_depth: int = MAX_DATA_SEARCH_DEPTH) -> Path | None:
+    """Breadth-first search under ``root`` for the directory holding train.csv.
+
+    Breadth-first so the shallowest match wins: if both ``<slug>/dataset/`` and
+    some nested copy contain train.csv, we want the canonical outer one.
+    Directories in ``_SKIP_DIRS`` are pruned -- an attached image dataset can
+    hold 100k+ files and walking it would stall the session.
     """
-    candidates = sorted(Path(p) for p in glob(str(KAGGLE_INPUT / "*") + "/"))
-    for cand in candidates:
-        if _looks_like_data_dir(cand):
-            return cand
-        nested = cand / "dataset"
-        if _looks_like_data_dir(nested):
-            return nested
-        # Some uploads keep the repo layout: <slug>/Amazon-ML-24/dataset/
-        for deep in sorted(cand.glob("*/dataset")):
-            if _looks_like_data_dir(deep):
-                return deep
-    if candidates:
-        logger.warning(
-            "No mounted Kaggle dataset contained train.csv; falling back to %s. "
-            "Attach the competition data as an input dataset.",
-            candidates[0],
-        )
-        return candidates[0]
-    logger.warning("No Kaggle input datasets mounted; using %s", KAGGLE_INPUT)
+    frontier = [(root, 0)]
+    while frontier:
+        current, depth = frontier.pop(0)
+        if _looks_like_data_dir(current):
+            return current
+        if depth >= max_depth:
+            continue
+        try:
+            children = sorted(p for p in current.iterdir() if p.is_dir())
+        except (OSError, PermissionError):
+            continue
+        for child in children:
+            if child.name.lower() in _SKIP_DIRS or child.name.startswith("."):
+                continue
+            frontier.append((child, depth + 1))
+    return None
+
+
+def _find_kaggle_data_dir() -> Path:
+    """Locate the competition CSVs among the mounted Kaggle input datasets.
+
+    No dataset slug is hardcoded. The official archive nests the files as
+    ``<slug>/student_resource 3/dataset/train.csv`` (note the space in the
+    folder name), so a recursive bounded search is used rather than a fixed
+    list of candidate layouts.
+    """
+    mounted = sorted(Path(p) for p in glob(str(KAGGLE_INPUT / "*") + "/"))
+
+    for cand in mounted:
+        found = _search_for_data_dir(cand)
+        if found is not None:
+            logger.info("Found competition data at %s", found)
+            return found
+
+    # Nothing matched. Say exactly what *is* mounted, so the fix is obvious
+    # instead of requiring a separate debugging round-trip.
+    logger.warning(
+        "No mounted Kaggle dataset contains train.csv (searched %d dataset(s) "
+        "to depth %d). Mounted inputs: %s. Attach the competition dataset via "
+        "'+ Add Input' in the notebook sidebar, then restart the session.",
+        len(mounted), MAX_DATA_SEARCH_DEPTH,
+        [p.name for p in mounted] or "(none)",
+    )
+    if mounted:
+        return mounted[0]
     return KAGGLE_INPUT
 
 
@@ -144,16 +183,33 @@ def run_dir(run_id: str) -> Path:
 
 
 def describe() -> dict:
-    """Path summary, logged at the start of every pipeline for reproducibility."""
-    return {
+    """Path summary, logged at the start of every pipeline for reproducibility.
+
+    ``train_csv_found`` is the one that matters: if it is False, nothing
+    downstream can work, and the reason is almost always that the competition
+    dataset was not attached to the session.
+    """
+    train_csv = DATA_DIR / "train.csv"
+    info = {
         "environment": "kaggle" if on_kaggle() else "local",
         "repo_root": str(REPO_ROOT),
         "data_dir": str(DATA_DIR),
         "results_dir": str(RESULTS_DIR),
         "image_dir": str(IMAGE_DIR),
         "data_dir_exists": DATA_DIR.exists(),
+        "train_csv_found": train_csv.exists(),
         "image_dir_exists": IMAGE_DIR.exists(),
     }
+    if on_kaggle():
+        info["mounted_inputs"] = [
+            p.name for p in sorted(KAGGLE_INPUT.iterdir())
+        ] if KAGGLE_INPUT.exists() else []
+    if not train_csv.exists():
+        info["PROBLEM"] = (
+            "train.csv not found under data_dir. Attach the competition dataset "
+            "('+ Add Input' in the notebook sidebar) and restart the session."
+        )
+    return info
 
 
 __all__ = [

@@ -38,6 +38,7 @@ Run `python scripts/run_local.py eda` to regenerate; tables land in
 | `entity_name` skew | **31.5x** | class-weighted loss |
 | `train.csv` `index` column | **absent** | synthesised from row position |
 | Units outside `constants.py` | 1.64% *of the labels* | `reject_invalid_units` costs ~0.2% |
+| Exponent output (`2.2e2 kilogram`) | explicitly **invalid** | never emitted; exponent *input* is converted |
 
 ### Metric: F1 with exact string match
 
@@ -110,12 +111,12 @@ src/amlc24/
   postprocess/     unit vocabulary + normalisation rules
   metrics/         competition F1: micro + macro, per-entity, per-group,
                    per-unit, error analysis
-  results/         per-run artefacts + leaderboard
+  results/         per-run artefacts, leaderboard, submission writer
   pipeline/        run_eda, run_finetune  ← notebooks call only these
 kaggle_notebook/   thin orchestrators (no logic)
 scripts/           download_images.py, run_local.py
 results/           leaderboard.csv, splits/, runs/, eda/   (committed)
-tests/             260 tests
+tests/             311 tests
 ```
 
 ### Design rules
@@ -141,7 +142,7 @@ pip install -r requirements.txt
 # put train.csv / test.csv (and the dataset's src/constants.py) under ./data/
 # note: train.csv has no `index` column; it is synthesised from row position
 
-python -m pytest tests/ -q          # 260 tests, ~8s
+python -m pytest tests/ -q          # 311 tests, ~9s
 python scripts/run_local.py eda     # profile train.csv -> results/eda/
 python scripts/run_local.py splits  # create/verify the frozen 5k split
 python scripts/download_images.py   # ~15k images, resized, resumable
@@ -153,11 +154,19 @@ fine-tune has to beat); `--smoke` runs a tiny end-to-end plumbing check.
 
 ### Kaggle
 
+The competition archive mounts as
+`/kaggle/input/<slug>/student_resource 3/dataset/train.csv` — note the extra
+nesting and the space in the folder name. `paths.py` finds it with a bounded
+recursive search (pruning image directories), so no slug or layout is
+hardcoded. If `train_csv_found` is `False` in the first cell's output, the
+dataset simply is not attached — use **+ Add Input** in the sidebar.
+
 1. Push this repo to GitHub.
 2. Create a notebook, **Accelerator → GPU T4 ×2** (see the T4 note below).
 3. Attach the competition dataset, and the resized-image dataset if you made one.
 4. Upload the repo as a Dataset, or let the notebook `git clone` it (internet is
-   enabled). The bootstrap cell finds `src/` either way — no slug is hardcoded.
+   enabled). The bootstrap cell finds `src/` either way — no slug is hardcoded,
+   and it `git pull`s an existing clone so a re-run picks up the latest code.
 5. Run [`kaggle_notebook/run000_eda.ipynb`](kaggle_notebook/) first (CPU, minutes),
    then [`run001_qwen2vl_8bit_10k.ipynb`](kaggle_notebook/).
 
@@ -289,5 +298,19 @@ noise.
 `error_analysis.csv` is the most actionable of these: it ranks the most frequent
 `(predicted, actual)` mismatch pairs per entity and flags the ones that differ
 *only* in the unit — those are missing aliases, and free score.
+
+## Submissions
+
+`results/submission.py` writes the two-column `index,prediction` file and
+validates it against the official rules before writing — the same checks as the
+dataset's `src/sanity.py`, plus one it does not make: **the row count must equal
+`test.csv` exactly**, or the file is not evaluated at all. Test indices the
+model did not produce are filled with an empty prediction, which costs one false
+negative rather than the whole submission.
+
+```python
+from amlc24.results.submission import write_submission
+write_submission(predictions, "submission.csv", test_df=test_df)
+```
 
 See [`NOTES.md`](NOTES.md) for the research journal.

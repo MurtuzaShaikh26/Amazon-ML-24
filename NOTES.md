@@ -234,6 +234,32 @@ the most of any) get the least signal. Hence the class-weighted loss below.
 3. Class-weighted loss (`train.class_weights`, `sqrt_inverse`)
 4. Macro F1 + per-`group_id` breakdown added to every run's output
 
+### Follow-ups from the official problem statement (2026-09-14)
+
+Reading the competition description alongside the real archive surfaced three
+more things, two of them bugs.
+
+* **Exponent notation is explicitly invalid output.** The statement lists
+  `"2.2e2 kilogram"` among the invalid examples. But `str(float(x))` — the
+  convention the EDA told us to adopt — emits exponent form for extreme
+  magnitudes: `1e20` rendered as `'1e+20'`. Every float path now routes through
+  `_plain_decimal`, so output is always positional. Exponent *input* is now
+  parsed and converted (`2.2e2 kilogram` → `220.0 kilogram`) rather than
+  blanked, since blanking is a guaranteed false negative.
+* **Exponent minus was being read as a range separator.** `1.5E-2 litre`
+  parsed as the range `[1.5, 2.0]` — the regex backtracked, matched `E` as a
+  unit and `-` as the separator, and invented a confident wrong answer. Fixed
+  with a `(?![eE][-+]?\d)` guard after the low number.
+* **Row count is checked by the grader but not by `sanity.py`.** The statement
+  says a file with more or fewer rows than `test.csv` "won't be evaluated", and
+  explicitly notes the shipped checker does not test this. `results/submission.py`
+  does, and back-fills missing indices with empty predictions.
+
+Also: the archive nests as `<slug>/student_resource 3/dataset/` (with a space),
+two levels deeper than the original detector searched — hence the bounded
+recursive search in `paths.py`. And the dataset's own `constants.py` now loads
+on Kaggle; it matches the built-in fallback exactly, with no drift warnings.
+
 ---
 
 ## Class-weighted loss
